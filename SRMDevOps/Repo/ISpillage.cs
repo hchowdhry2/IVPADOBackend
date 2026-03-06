@@ -19,5 +19,9 @@ namespace SRMDevOps.Repo
         Task<List<SprintProgressDto>> GetClientSprintStatsByTime(string projectName, string timeframe);
         Task<List<SpillageTrendDto>> GetClientSpillageTrend(string projectName, int lastNSprints);
         Task<List<SpillageTrendDto>> GetClientSpillageTimeline(string projectName, string timeframe);
+
+        // Aggregated business methods moved from controller
+        Task<SpillageSummaryDto> GetSpillageSummaryLast(string projectName, int lastNSprints);
+        Task<SpillageSummaryDto> GetSpillageSummaryTime(string projectName, string timeframe);
     }
 }

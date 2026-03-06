@@ -1,78 +1,4 @@
-﻿using System.Collections.Generic;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
-using SRMDevOps.Dto;
-using SRMDevOps.Repo;
-
-namespace SRMDevOps.Controllers
-{
-    [Route("api/[controller]")]
-    [ApiController]
-    public class SpillageController : ControllerBase
-    {
-        private readonly ISpillage _spillage;
-
-        public SpillageController(ISpillage spillage)
-        {
-            _spillage = spillage;
-        }
-
-        /// <summary>
-        /// Unified summary endpoint. Use query parameters to select mode:
-        /// - ?lastNSprints=5  -> last-N-sprints mode
-        /// - ?timeframe=yearly -> timeframe mode ("yearly" or default 6 months)
-        /// If both provided, lastNSprints takes precedence.
-        /// </summary>
-        [HttpGet("summary/{projectName}")]
-        public async Task<IActionResult> GetSpillageSummary(
-            string projectName,
-            [FromQuery] int? lastNSprints,
-            [FromQuery] string? timeframe)
-        {
-            // last-N-sprints mode (takes precedence when provided)
-            if (lastNSprints.HasValue && lastNSprints.Value > 0)
-            {
-                // execute sequentially to avoid concurrent DbContext access
-                var statsAll = await _spillage.GetAllSprintStats(projectName, lastNSprints.Value);
-                var statsFeature = await _spillage.GetFeatureSprintStats(projectName, lastNSprints.Value);
-                var statsClient = await _spillage.GetClientSprintStats(projectName, lastNSprints.Value);
-
-                var trendAll = await _spillage.GetAllSpillageTrend(projectName, lastNSprints.Value);
-                var trendFeature = await _spillage.GetFeatureSpillageTrend(projectName, lastNSprints.Value);
-                var trendClient = await _spillage.GetClientSpillageTrend(projectName, lastNSprints.Value);
-
-                var summary = new SpillageSummaryDto
-                {
-                    All = new SectionDto { Stats = statsAll, Spillage = trendAll },
-                    Feature = new SectionDto { Stats = statsFeature, Spillage = trendFeature },
-                    Client = new SectionDto { Stats = statsClient, Spillage = trendClient }
-                };
-
-                return Ok(summary);
-            }
-
-            // timeframe mode (defaults to service behavior if timeframe is null/empty)
-            var statsAllTime = await _spillage.GetAllSprintStatsByTime(projectName, timeframe ?? string.Empty);
-            var statsFeatureTime = await _spillage.GetFeatureSprintStatsByTime(projectName, timeframe ?? string.Empty);
-            var statsClientTime = await _spillage.GetClientSprintStatsByTime(projectName, timeframe ?? string.Empty);
-
-            var timelineAll = await _spillage.GetAllSpillageTimeline(projectName, timeframe ?? string.Empty);
-            var timelineFeature = await _spillage.GetFeatureSpillageTimeline(projectName, timeframe ?? string.Empty);
-            var timelineClient = await _spillage.GetClientSpillageTimeline(projectName, timeframe ?? string.Empty);
-
-            var summaryTime = new SpillageSummaryDto
-            {
-                All = new SectionDto { Stats = statsAllTime, Spillage = timelineAll },
-                Feature = new SectionDto { Stats = statsFeatureTime, Spillage = timelineFeature },
-                Client = new SectionDto { Stats = statsClientTime, Spillage = timelineClient }
-            };
-
-            return Ok(summaryTime);
-        }
-    }
-}
-
-//using System.Collections.Generic;
+﻿//using System.Collections.Generic;
 //using System.Threading.Tasks;
 //using Microsoft.AspNetCore.Mvc;
 //using SRMDevOps.Dto;
@@ -91,55 +17,74 @@ namespace SRMDevOps.Controllers
 //            _spillage = spillage;
 //        }
 
-//        // Aggregated endpoint for last N sprints:
-//        // Returns SpillageSummaryDto with segregated sections for clarity on the frontend.
-//        [HttpGet("summary-last/{projectName}/{lastNSprints}")]
-//        public async Task<IActionResult> GetSpillageSummaryLast(string projectName, int lastNSprints)
+//        /// <summary>
+//        /// Unified summary endpoint. Use query parameters to select mode:
+//        /// - ?lastNSprints=5  -> last-N-sprints mode
+//        /// - ?timeframe=yearly -> timeframe mode ("yearly" or default 6 months)
+//        /// If both provided, lastNSprints takes precedence.
+//        /// </summary>
+//        [HttpGet("summary/{projectName}")]
+//        public async Task<IActionResult> GetSpillageSummary(
+//            string projectName,
+//            [FromQuery] int? lastNSprints,
+//            [FromQuery] string? timeframe)
 //        {
-//            // Execute repository calls sequentially to avoid concurrent DbContext access.
-//            var statsAll = await _spillage.GetAllSprintStats(projectName, lastNSprints);
-//            var statsFeature = await _spillage.GetFeatureSprintStats(projectName, lastNSprints);
-//            var statsClient = await _spillage.GetClientSprintStats(projectName, lastNSprints);
-
-//            var trendAll = await _spillage.GetAllSpillageTrend(projectName, lastNSprints);
-//            var trendFeature = await _spillage.GetFeatureSpillageTrend(projectName, lastNSprints);
-//            var trendClient = await _spillage.GetClientSpillageTrend(projectName, lastNSprints);
-
-//            var summary = new SpillageSummaryDto
+//            // last-N-sprints mode (takes precedence when provided)
+//            if (lastNSprints.HasValue && lastNSprints.Value > 0)
 //            {
-//                All = new SectionDto { Stats = statsAll, Spillage = trendAll },
-//                Feature = new SectionDto { Stats = statsFeature, Spillage = trendFeature },
-//                Client = new SectionDto { Stats = statsClient, Spillage = trendClient }
-//            };
+//                // Fix: Pass lastNSprints.Value (int) instead of lastNSprints (int?)
+//                var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
+//                return Ok(summary);
+//            }
 
-//            return Ok(summary);
-//        }
-
-//        // Aggregated endpoint for timeframe-based queries:
-//        // Returns SpillageSummaryDto with segregated sections for clarity on the frontend.
-//        [HttpGet("summary-time/{projectName}/{timeframe}")]
-//        public async Task<IActionResult> GetSpillageSummaryTime(string projectName, string timeframe)
-//        {
-//            // Execute repository calls sequentially to avoid concurrent DbContext access.
-//            var statsAll = await _spillage.GetAllSprintStatsByTime(projectName, timeframe);
-//            var statsFeature = await _spillage.GetFeatureSprintStatsByTime(projectName, timeframe);
-//            var statsClient = await _spillage.GetClientSprintStatsByTime(projectName, timeframe);
-
-//            var timelineAll = await _spillage.GetAllSpillageTimeline(projectName, timeframe);
-//            var timelineFeature = await _spillage.GetFeatureSpillageTimeline(projectName, timeframe);
-//            var timelineClient = await _spillage.GetClientSpillageTimeline(projectName, timeframe);
-
-//            var summary = new SpillageSummaryDto
+//            else
 //            {
-//                All = new SectionDto { Stats = statsAll, Spillage = timelineAll },
-//                Feature = new SectionDto { Stats = statsFeature, Spillage = timelineFeature },
-//                Client = new SectionDto { Stats = statsClient, Spillage = timelineClient }
-//            };
-
-//            return Ok(summary);
+//                // timeframe mode (defaults to service behavior if timeframe is null/empty)
+//                var summary = await _spillage.GetSpillageSummaryTime(projectName, timeframe);
+//                return Ok(summary);
+//            }
 //        }
 //    }
 //}
+
+using System.Collections.Generic;
+using System.Threading.Tasks;
+using Microsoft.AspNetCore.Mvc;
+using SRMDevOps.Dto;
+using SRMDevOps.Repo;
+
+namespace SRMDevOps.Controllers
+{
+    [Route("api/[controller]")]
+    [ApiController]
+    public class SpillageController : ControllerBase
+    {
+        private readonly ISpillage _spillage;
+
+        public SpillageController(ISpillage spillage)
+        {
+            _spillage = spillage;
+        }
+
+        // Aggregated endpoint for last N sprints:
+        // Returns SpillageSummaryDto with segregated sections for clarity on the frontend.
+        [HttpGet("summary-last/{projectName}/{lastNSprints}")]
+        public async Task<IActionResult> GetSpillageSummaryLast(string projectName, int lastNSprints)
+        {
+            var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints);
+            return Ok(summary);
+        }
+
+        // Aggregated endpoint for timeframe-based queries:
+        // Returns SpillageSummaryDto with segregated sections for clarity on the frontend.
+        [HttpGet("summary-time/{projectName}/{timeframe}")]
+        public async Task<IActionResult> GetSpillageSummaryTime(string projectName, string timeframe)
+        {
+            var summary = await _spillage.GetSpillageSummaryTime(projectName, timeframe);
+            return Ok(summary);
+        }
+    }
+}
 
 //using Microsoft.AspNetCore.Http;
 //using Microsoft.AspNetCore.Mvc;
