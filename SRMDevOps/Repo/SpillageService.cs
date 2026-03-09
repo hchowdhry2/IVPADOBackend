@@ -187,6 +187,8 @@ namespace SRMDevOps.Repo
                     monthsBack = n ?? 6;
                 else if (string.Equals(timeframe, "yearly", StringComparison.OrdinalIgnoreCase))
                     monthsBack = (n ?? 1) * 12;
+                else if (string.Equals(timeframe, "quarterly", StringComparison.OrdinalIgnoreCase))
+                    monthsBack = (n ?? 1) * 3;
                 else
                     monthsBack = n ?? 6;
 

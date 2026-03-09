@@ -34,18 +34,19 @@ namespace SRMDevOps.Controllers
             [FromQuery] int? n)
         {
             // last-N-sprints mode (takes precedence when provided)
-            if (lastNSprints.HasValue && lastNSprints.Value > 0)
-            {
-                var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
-                return Ok(summary);
-            }
+            //if (lastNSprints.HasValue && lastNSprints.Value > 0)
+            //{
+            //    var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
+            //    return Ok(summary);
+            //}
 
             // timeframe mode
             var tf = timeframe ?? string.Empty;
 
             // If monthly/yearly bucketing is requested, call month-bucketing service methods.
             if (tf.Equals("monthly", System.StringComparison.OrdinalIgnoreCase) ||
-                tf.Equals("yearly", System.StringComparison.OrdinalIgnoreCase))
+                tf.Equals("yearly", System.StringComparison.OrdinalIgnoreCase) ||
+                tf.Equals("quarterly", System.StringComparison.OrdinalIgnoreCase))
             {
                 // Sequential calls to avoid concurrent DbContext access
                 var spillageAll = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, null);
@@ -68,6 +69,12 @@ namespace SRMDevOps.Controllers
                     Client = new SectionDto { Stats = statsClient, Spillage = spillageClient, History = historyClient }
                 };
 
+                return Ok(summary);
+            }
+
+            if (lastNSprints.HasValue && lastNSprints.Value > 0)
+            {
+                var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
                 return Ok(summary);
             }
 
