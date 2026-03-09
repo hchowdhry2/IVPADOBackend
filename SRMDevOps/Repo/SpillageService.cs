@@ -105,6 +105,133 @@ namespace SRMDevOps.Repo
             return grouped;
         }
 
+        /// <summary>
+        /// Returns monthly-bucketed spillage (month label like "Jan 2026") for the given timeframe.
+        /// timeframe: "monthly" or "yearly". 
+        /// - If timeframe == "monthly", <paramref name="n"/> is number of months (defaults to 6).
+        /// - If timeframe == "yearly", <paramref name="n"/> is number of years (defaults to 1) and will be converted to months.
+        /// parentType: null for all, "Feature" or "Client Issue".
+        /// </summary>
+        public async Task<List<SpillageTrendDto>> GetSpillageByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null)
+        {
+            try
+            {
+                // 1. Determine months window
+                int monthsBack;
+                if (string.Equals(timeframe, "monthly", StringComparison.OrdinalIgnoreCase))
+                    monthsBack = n ?? 6;
+                else if (string.Equals(timeframe, "yearly", StringComparison.OrdinalIgnoreCase))
+                    monthsBack = (n ?? 1) * 12;
+                else
+                    monthsBack = n ?? 6;
+
+                if (monthsBack <= 0) return new List<SpillageTrendDto>();
+
+                // 2. Set Time Window
+                var now = DateTime.Now;
+                var windowStart = new DateTime(now.Year, now.Month, 1).AddMonths(-(monthsBack - 1));
+
+                // 3. Get raw data (fetch all relevant data first)
+                var aggregated = await GetAggregatedStatsAsync(
+                    projectName: projectName,
+                    parentType: parentType,
+                    minFirstInprogress: null,
+                    requireFirstInprogressNotNull: false
+                );
+
+                var result = new List<SpillageTrendDto>();
+
+                // 4. Loop through every expected month to fill gaps
+                for (int i = 0; i < monthsBack; i++)
+                {
+                    var currentMonthStart = windowStart.AddMonths(i);
+                    var currentMonthEnd = currentMonthStart.AddMonths(1).AddTicks(-1);
+
+                    // Filter data for this specific month
+                    var inMonth = aggregated
+                        .Where(a => a.SortDate >= currentMonthStart && a.SortDate <= currentMonthEnd)
+                        .ToList();
+
+                    var total = inMonth.Sum(x => x.Total);
+                    var closed = inMonth.Sum(x => x.Closed);
+
+                    // 5. Map to SpillageTrendDto (Spillage = Total - Closed)
+                    result.Add(new SpillageTrendDto
+                    {
+                        IterationPath = currentMonthStart.ToString("MMM yyyy"), // e.g. "Oct 2023"
+                        SpillagePoints = total - closed,
+                        SortDate = currentMonthStart
+                    });
+                }
+
+                return result;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return new List<SpillageTrendDto>();
+            }
+        }
+
+        /// <summary>
+        /// Returns monthly-bucketed sprint stats (month label like "Jan 2026") for the given timeframe.
+        /// Uses same timeframe semantics as GetSpillageByMonthsAsync.
+        /// </summary>
+        /// 
+        public async Task<List<SprintProgressDto>> GetSprintStatsByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null)
+        {
+            try
+            {
+                int monthsBack;
+                if (string.Equals(timeframe, "monthly", StringComparison.OrdinalIgnoreCase))
+                    monthsBack = n ?? 6;
+                else if (string.Equals(timeframe, "yearly", StringComparison.OrdinalIgnoreCase))
+                    monthsBack = (n ?? 1) * 12;
+                else
+                    monthsBack = n ?? 6;
+
+                if (monthsBack <= 0) return new List<SprintProgressDto>();
+
+                var now = DateTime.Now;
+                var windowStart = new DateTime(now.Year, now.Month, 1).AddMonths(-(monthsBack - 1));
+
+                // Get raw data
+                var aggregated = await GetAggregatedStatsAsync(projectName: projectName, parentType: parentType, minFirstInprogress: null, requireFirstInprogressNotNull: false);
+
+                // Correct List Type
+                var result = new List<SprintProgressDto>();
+
+                for (int i = 0; i < monthsBack; i++)
+                {
+                    var currentMonthStart = windowStart.AddMonths(i);
+                    var currentMonthEnd = currentMonthStart.AddMonths(1).AddTicks(-1);
+
+                    var inMonth = aggregated
+                        .Where(a => a.SortDate >= currentMonthStart && a.SortDate <= currentMonthEnd)
+                        .ToList();
+
+                    var total = inMonth.Sum(x => x.Total);
+                    var closed = inMonth.Sum(x => x.Closed);
+
+                    // Correct DTO and Property Mapping
+                    result.Add(new SprintProgressDto
+                    {
+                        IterationPath = currentMonthStart.ToString("MMM yyyy"),
+                        TotalPointsAssigned = total,      // Store Total
+                        TotalPointsCompleted = closed,    // Store Closed
+                        SortDate = currentMonthStart
+                    });
+                }
+
+                return result;
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return new List<SprintProgressDto>();
+            }
+        }
+
         // Mapping helpers
         private static List<SpillageTrendDto> ToSpillageTrendDto(List<AggregatedStat> stats)
         {

@@ -28,5 +28,9 @@ namespace SRMDevOps.Repo
         // parentType: null for all, "Feature" or "Client Issue" to filter
         Task<List<StoryHistoryDto>> GetStoryHistoryLastNSprints(string projectName, int lastNSprints, string? parentType = null);
         Task<List<StoryHistoryDto>> GetStoryHistoryByTimeframe(string projectName, string timeframe, string? parentType = null);
+
+        // new for monthly-yearly
+        Task<List<SpillageTrendDto>> GetSpillageByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null);
+        Task<List<SprintProgressDto>> GetSprintStatsByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null);
     }
 }

@@ -1,4 +1,7 @@
-﻿using System.Collections.Generic;
+﻿using Microsoft.AspNetCore.Mvc;
+using SRMDevOps.Dto;
+using SRMDevOps.Repo;
+using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using SRMDevOps.Dto;
@@ -18,34 +21,113 @@ namespace SRMDevOps.Controllers
         }
 
         /// <summary>
-        /// Unified summary endpoint. Use query parameters to select mode:
-        /// - ?lastNSprints=5  -> last-N-sprints mode
-        /// - ?timeframe=yearly -> timeframe mode ("yearly" or default 6 months)
-        /// If both provided, lastNSprints takes precedence.
+        /// Unified summary endpoint.
+        /// - ?lastNSprints=5  -> last-N-sprints mode (takes precedence)
+        /// - ?timeframe=monthly|yearly -> timeframe mode
+        /// - ?n=6 -> used with timeframe=monthly (months) or timeframe=yearly (years)
         /// </summary>
         [HttpGet("summary/{projectName}")]
         public async Task<IActionResult> GetSpillageSummary(
             string projectName,
             [FromQuery] int? lastNSprints,
-            [FromQuery] string? timeframe)
+            [FromQuery] string? timeframe,
+            [FromQuery] int? n)
         {
             // last-N-sprints mode (takes precedence when provided)
             if (lastNSprints.HasValue && lastNSprints.Value > 0)
             {
-                // Fix: Pass lastNSprints.Value (int) instead of lastNSprints (int?)
                 var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
                 return Ok(summary);
             }
 
-            else
+            // timeframe mode
+            var tf = timeframe ?? string.Empty;
+
+            // If monthly/yearly bucketing is requested, call month-bucketing service methods.
+            if (tf.Equals("monthly", System.StringComparison.OrdinalIgnoreCase) ||
+                tf.Equals("yearly", System.StringComparison.OrdinalIgnoreCase))
             {
-                // timeframe mode (defaults to service behavior if timeframe is null/empty)
-                var summary = await _spillage.GetSpillageSummaryTime(projectName, timeframe);
+                // Sequential calls to avoid concurrent DbContext access
+                var spillageAll = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, null);
+                var spillageFeature = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, "Feature");
+                var spillageClient = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, "Client Issue");
+
+                var statsAll = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, null);
+                var statsFeature = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, "Feature");
+                var statsClient = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, "Client Issue");
+
+                var historyAll = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, null);
+                var historyFeature = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, "Feature");
+                var historyClient = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, "Client Issue");
+
+
+                var summary = new SpillageSummaryDto
+                {
+                    All = new SectionDto { Stats = statsAll, Spillage = spillageAll, History = historyAll },
+                    Feature = new SectionDto { Stats = statsFeature, Spillage = spillageFeature, History = historyFeature },
+                    Client = new SectionDto { Stats = statsClient, Spillage = spillageClient, History = historyClient }
+                };
+
                 return Ok(summary);
             }
+
+            // Fallback: use existing service summary-by-time behaviour
+            var fallback = await _spillage.GetSpillageSummaryTime(projectName, tf);
+            return Ok(fallback);
         }
     }
 }
+
+
+
+//using System.Collections.Generic;
+//using System.Threading.Tasks;
+//using Microsoft.AspNetCore.Mvc;
+//using SRMDevOps.Dto;
+//using SRMDevOps.Repo;
+
+//namespace SRMDevOps.Controllers
+//{
+//    [Route("api/[controller]")]
+//    [ApiController]
+//    public class SpillageController : ControllerBase
+//    {
+//        private readonly ISpillage _spillage;
+
+//        public SpillageController(ISpillage spillage)
+//        {
+//            _spillage = spillage;
+//        }
+
+//        /// <summary>
+//        /// Unified summary endpoint. Use query parameters to select mode:
+//        /// - ?lastNSprints=5  -> last-N-sprints mode
+//        /// - ?timeframe=yearly -> timeframe mode ("yearly" or default 6 months)
+//        /// If both provided, lastNSprints takes precedence.
+//        /// </summary>
+//        [HttpGet("summary/{projectName}")]
+//        public async Task<IActionResult> GetSpillageSummary(
+//            string projectName,
+//            [FromQuery] int? lastNSprints,
+//            [FromQuery] string? timeframe)
+//        {
+//            // last-N-sprints mode (takes precedence when provided)
+//            if (lastNSprints.HasValue && lastNSprints.Value > 0)
+//            {
+//                // Fix: Pass lastNSprints.Value (int) instead of lastNSprints (int?)
+//                var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
+//                return Ok(summary);
+//            }
+
+//            else
+//            {
+//                // timeframe mode (defaults to service behavior if timeframe is null/empty)
+//                var summary = await _spillage.GetSpillageSummaryTime(projectName, timeframe);
+//                return Ok(summary);
+//            }
+//        }
+//    }
+//}
 
 //using System.Collections.Generic;
 //using System.Threading.Tasks;
