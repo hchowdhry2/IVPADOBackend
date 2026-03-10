@@ -1,6 +1,8 @@
 ﻿using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using SRMDevOps.DataAccess;
@@ -18,14 +20,15 @@ namespace SRMDevOps.Repo
         }
 
         // Private aggregate holder to return from in-memory mapping
-        private sealed record AggregatedStat(string FullPath, double Total, double Closed, DateTime SortDate);
+        // Make SortDate nullable because EF Max(...) can be null for some groups.
+        private sealed record AggregatedStat(string FullPath, double Total, double Closed, DateTime? SortDate);
 
-        // Helper: compute start date based on timeframe
+        // Helper: compute default start date for legacy timeframe strings
         private static DateTime GetStartDate(string timeframe) =>
             timeframe?.ToLower() == "yearly" ? DateTime.Now.AddYears(-1) : DateTime.Now.AddMonths(-6);
 
         // Helper: get recent sprint paths (same criteria as original methods)
-        private async Task<List<(string Path, DateTime SortDate)>> GetRecentSprintsAsync(string projectName, int lastNSprints)
+        private async Task<List<(string Path, DateTime? SortDate)>> GetRecentSprintsAsync(string projectName, int lastNSprints)
         {
             var raw = await _context.IvpUserStoryIterations
                 .Where(usi =>
@@ -37,14 +40,18 @@ namespace SRMDevOps.Repo
                 .Select(g => new
                 {
                     Path = g.Key,
-                    SortDate = g.Max(x => x.AssignedDate)
+                    // Calculate the Mode Date (the date with the most assignments)
+                    SortDate = g.GroupBy(x => x.AssignedDate.Date)
+                                .OrderByDescending(dg => dg.Count())
+                                .Select(dg => dg.Key)
+                                .FirstOrDefault()
                 })
-                .OrderByDescending(x => x.SortDate)
+                .OrderByDescending(x => x.SortDate) // This now sorts by the 'real' sprint timeframe
                 .Take(lastNSprints)
                 .ToListAsync();
 
             return raw
-                .Select(x => (x.Path ?? string.Empty, x.SortDate))
+                .Select(x => (Path: x.Path ?? string.Empty, SortDate: (DateTime?)x.SortDate))
                 .ToList();
         }
 
@@ -88,79 +95,100 @@ namespace SRMDevOps.Repo
                 query = query.Where(c => c.usd.FirstInprogressTime != null);
 
             var rawGrouped = await query
-                .GroupBy(c => c.usi.IterationPath)
-                .Select(g => new
-                {
-                    FullPath = g.Key,
-                    Total = g.Sum(x => x.usd.StoryPoints ?? 0),
-                    Closed = g.Sum(x => x.usd.State == "Closed" ? (x.usd.StoryPoints ?? 0) : 0),
-                    SortDate = g.Max(x => x.usi.AssignedDate)
-                })
-                .ToListAsync();
+            .GroupBy(c => c.usi.IterationPath)
+            .Select(g => new
+            {
+                FullPath = g.Key,
+                Total = g.Sum(x => x.usd.StoryPoints ?? 0),
+                Closed = g.Sum(x => x.usd.State == "Closed" ? (x.usd.StoryPoints ?? 0) : 0),
+                // Group internal dates to find the most frequent day
+                DateFrequencies = g.GroupBy(x => x.usi.AssignedDate.Date)
+                                   .Select(dg => new { Date = dg.Key, Count = dg.Count() })
+                                   .OrderByDescending(dg => dg.Count)
+                                   .FirstOrDefault()
+            })
+            .ToListAsync();
 
             var grouped = rawGrouped
-                .Select(g => new AggregatedStat(g.FullPath ?? string.Empty, g.Total, g.Closed, g.SortDate))
+                .Select(g => new AggregatedStat(
+                    g.FullPath ?? string.Empty,
+                    g.Total,
+                    g.Closed,
+                    g.DateFrequencies?.Date ?? DateTime.MinValue // This is now your "SortDate"
+                ))
                 .ToList();
 
             return grouped;
         }
 
-        /// <summary>
-        /// Returns monthly-bucketed spillage (month label like "Jan 2026") for the given timeframe.
-        /// timeframe: "monthly" or "yearly". 
-        /// - If timeframe == "monthly", <paramref name="n"/> is number of months (defaults to 6).
-        /// - If timeframe == "yearly", <paramref name="n"/> is number of years (defaults to 1) and will be converted to months.
-        /// parentType: null for all, "Feature" or "Client Issue".
-        /// </summary>
-        public async Task<List<SpillageTrendDto>> GetSpillageByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null)
+        // Helper: normalize period unit and get bucket size (months) and default n
+        private static (string unit, int bucketMonths, int defaultN) NormalizePeriodUnit(string? unit)
+        {
+            var u = unit?.Trim().ToLowerInvariant();
+            return u switch
+            {
+                "quarter" or "quarterly" => ( "quarterly", 3, 4 ), // default 4 quarters = 1 year
+                "year" or "yearly" => ( "yearly", 12, 1 ),
+                _ => ( "monthly", 1, 6 ) // default monthly, 6 months
+            };
+        }
+
+        // Helper: compute window start from period unit and number of periods (nPeriods)
+        private static DateTime ComputeWindowStart(string unit, int nPeriods)
+        {
+            var now = DateTime.Now;
+            var bucketMonths = unit == "quarterly" ? 3 : unit == "yearly" ? 12 : 1;
+            var monthsBack = nPeriods * bucketMonths;
+            var windowStart = new DateTime(now.Year, now.Month, 1).AddMonths(-(monthsBack - 1));
+            return windowStart;
+        }
+
+        // New: generalized period aggregator for spillage (monthly/quarterly/yearly)
+        public async Task<List<SpillageTrendDto>> GetSpillageByPeriodAsync(string projectName, string? periodUnit, int? n, string? parentType = null)
         {
             try
             {
-                // 1. Determine months window
-                int monthsBack;
-                if (string.Equals(timeframe, "monthly", StringComparison.OrdinalIgnoreCase))
-                    monthsBack = n ?? 6;
-                else if (string.Equals(timeframe, "yearly", StringComparison.OrdinalIgnoreCase))
-                    monthsBack = (n ?? 1) * 12;
-                else
-                    monthsBack = n ?? 6;
+                var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(periodUnit);
+                var periods = n.HasValue && n.Value > 0 ? n.Value : defaultN;
 
-                if (monthsBack <= 0) return new List<SpillageTrendDto>();
+                if (periods <= 0) return new List<SpillageTrendDto>();
 
-                // 2. Set Time Window
-                var now = DateTime.Now;
-                var windowStart = new DateTime(now.Year, now.Month, 1).AddMonths(-(monthsBack - 1));
+                var windowStart = ComputeWindowStart(unit, periods);
+                // Fetch aggregated data across iterations (per sprint) for the project/parentType
+                // NOTE: do not pre-filter by FirstInprogressTime here — we want to aggregate per iteration
+                // then bucket by the iteration SortDate below. Pre-filtering by FirstInprogressTime caused
+                // mismatches with GetSprintStatsByPeriodAsync.
+                
+                var aggregated = await GetAggregatedStatsAsync(projectName: projectName, parentType: parentType, minFirstInprogress: null, requireFirstInprogressNotNull: true);
 
-                // 3. Get raw data (fetch all relevant data first)
-                var aggregated = await GetAggregatedStatsAsync(
-                    projectName: projectName,
-                    parentType: parentType,
-                    minFirstInprogress: null,
-                    requireFirstInprogressNotNull: false
-                );
+                
 
                 var result = new List<SpillageTrendDto>();
 
-                // 4. Loop through every expected month to fill gaps
-                for (int i = 0; i < monthsBack; i++)
+                for (int p = 0; p < periods; p++)
                 {
-                    var currentMonthStart = windowStart.AddMonths(i);
-                    var currentMonthEnd = currentMonthStart.AddMonths(1).AddTicks(-1);
+                    var periodStart = windowStart.AddMonths(p * bucketMonths);
+                    var periodEnd = periodStart.AddMonths(bucketMonths).AddTicks(-1);
 
-                    // Filter data for this specific month
-                    var inMonth = aggregated
-                        .Where(a => a.SortDate >= currentMonthStart && a.SortDate <= currentMonthEnd)
+                    var inPeriod = aggregated
+                        .Where(a => a.SortDate >= periodStart && a.SortDate <= periodEnd)
                         .ToList();
 
-                    var total = inMonth.Sum(x => x.Total);
-                    var closed = inMonth.Sum(x => x.Closed);
+                    var total = inPeriod.Sum(x => x.Total);
+                    var closed = inPeriod.Sum(x => x.Closed);
 
-                    // 5. Map to SpillageTrendDto (Spillage = Total - Closed)
+                    var label = unit switch
+                    {
+                        "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
+                        "yearly" => periodStart.ToString("yyyy"),
+                        _ => periodStart.ToString("MMM yyyy")
+                    };
+
                     result.Add(new SpillageTrendDto
                     {
-                        IterationPath = currentMonthStart.ToString("MMM yyyy"), // e.g. "Oct 2023"
+                        IterationPath = label,
                         SpillagePoints = total - closed,
-                        SortDate = currentMonthStart
+                        SortDate = periodStart
                     });
                 }
 
@@ -173,55 +201,61 @@ namespace SRMDevOps.Repo
             }
         }
 
-        /// <summary>
-        /// Returns monthly-bucketed sprint stats (month label like "Jan 2026") for the given timeframe.
-        /// Uses same timeframe semantics as GetSpillageByMonthsAsync.
-        /// </summary>
-        /// 
-        public async Task<List<SprintProgressDto>> GetSprintStatsByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null)
+        // New: generalized period aggregator for sprint stats (monthly/quarterly/yearly)
+        public async Task<List<SprintProgressDto>> GetSprintStatsByPeriodAsync(string projectName, string? periodUnit, int? n, string? parentType = null)
         {
             try
             {
-                int monthsBack;
-                if (string.Equals(timeframe, "monthly", StringComparison.OrdinalIgnoreCase))
-                    monthsBack = n ?? 6;
-                else if (string.Equals(timeframe, "yearly", StringComparison.OrdinalIgnoreCase))
-                    monthsBack = (n ?? 1) * 12;
-                else if (string.Equals(timeframe, "quarterly", StringComparison.OrdinalIgnoreCase))
-                    monthsBack = (n ?? 1) * 3;
-                else
-                    monthsBack = n ?? 6;
+                var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(periodUnit);
+                var periods = n.HasValue && n.Value > 0 ? n.Value : defaultN;
 
-                if (monthsBack <= 0) return new List<SprintProgressDto>();
+                if (periods <= 0) return new List<SprintProgressDto>();
 
-                var now = DateTime.Now;
-                var windowStart = new DateTime(now.Year, now.Month, 1).AddMonths(-(monthsBack - 1));
+                // 1. Calculate the start of the timeframe
+                var windowStart = ComputeWindowStart(unit, periods);
 
-                // Get raw data
-                var aggregated = await GetAggregatedStatsAsync(projectName: projectName, parentType: parentType, minFirstInprogress: null, requireFirstInprogressNotNull: false);
+                // 2. IMPORTANT: We fetch ALL data for the project. 
+                // We will filter by the Mid-Date of the Sprints in-memory to ensure accuracy.
+                // I've removed minFirstInprogress here because we want to filter by SPRINT date, not story date.
+                var aggregated = await GetAggregatedStatsAsync(
+                    projectName: projectName,
+                    parentType: parentType,
+                    minFirstInprogress: null, // Pass null to get the "Timeline" of sprints
+                    requireFirstInprogressNotNull: true);
 
-                // Correct List Type
+                DebugLogAggregated(aggregated, $"GetSpillageByPeriodAsync project={projectName} parentType={parentType} windowStart={windowStart:yyyy-MM-dd}");
+
                 var result = new List<SprintProgressDto>();
 
-                for (int i = 0; i < monthsBack; i++)
+                // 3. Loop through each period (e.g., Nov, Dec, Jan)
+                for (int p = 0; p < periods; p++)
                 {
-                    var currentMonthStart = windowStart.AddMonths(i);
-                    var currentMonthEnd = currentMonthStart.AddMonths(1).AddTicks(-1);
+                    var periodStart = windowStart.AddMonths(p * bucketMonths);
+                    // Use exclusive end date for clean bucketing
+                    var periodEnd = periodStart.AddMonths(bucketMonths);
 
-                    var inMonth = aggregated
-                        .Where(a => a.SortDate >= currentMonthStart && a.SortDate <= currentMonthEnd)
+                    // 4. Find all sprints whose "Center of Gravity" (SortDate) falls in this month
+                    // This ensures a sprint is counted EXACTLY once in the most relevant month.
+                    var inPeriod = aggregated
+                        .Where(a => a.SortDate >= periodStart && a.SortDate < periodEnd)
                         .ToList();
 
-                    var total = inMonth.Sum(x => x.Total);
-                    var closed = inMonth.Sum(x => x.Closed);
+                    var total = inPeriod.Sum(x => x.Total);
+                    var closed = inPeriod.Sum(x => x.Closed);
 
-                    // Correct DTO and Property Mapping
+                    var label = unit switch
+                    {
+                        "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
+                        "yearly" => periodStart.ToString("yyyy"),
+                        _ => periodStart.ToString("MMM yyyy")
+                    };
+
                     result.Add(new SprintProgressDto
                     {
-                        IterationPath = currentMonthStart.ToString("MMM yyyy"),
-                        TotalPointsAssigned = total,      // Store Total
-                        TotalPointsCompleted = closed,    // Store Closed
-                        SortDate = currentMonthStart
+                        IterationPath = label,
+                        TotalPointsAssigned = total,
+                        TotalPointsCompleted = closed,
+                        SortDate = periodStart
                     });
                 }
 
@@ -229,12 +263,12 @@ namespace SRMDevOps.Repo
             }
             catch (Exception e)
             {
-                Console.WriteLine(e.Message);
+                Console.WriteLine($"Error in GetSprintStatsByPeriodAsync: {e.Message}");
                 return new List<SprintProgressDto>();
             }
         }
 
-        // Mapping helpers
+        // Mapping helpers (unchanged)
         private static List<SpillageTrendDto> ToSpillageTrendDto(List<AggregatedStat> stats)
         {
             return stats
@@ -261,7 +295,7 @@ namespace SRMDevOps.Repo
                 .ToList();
         }
 
-        // Existing public methods (unchanged behavior, return empty lists on errors)
+        // Existing public methods (unchanged behavior for last-N and legacy timeframe)
         public async Task<List<SpillageTrendDto>> GetAllSpillageTimeline(string projectName, string timeframe)
         {
             try
@@ -465,7 +499,6 @@ namespace SRMDevOps.Repo
 
                 var sprintPaths = recent.Select(s => s.Path).ToList();
                 var aggregated = await GetAggregatedStatsAsync(iterationPaths: sprintPaths, parentType: "Client Issue", requireFirstInprogressNotNull: true);
-                // Note: keep behavior consistent with other methods (mapping & ordering)
                 var stats = ToSprintProgressDto(aggregated);
 
                 var finalResult = recent
@@ -503,7 +536,7 @@ namespace SRMDevOps.Repo
             }
         }
 
-        // New: aggregate summary for last N sprints (moved from controller)
+        // New: aggregate summary for last N sprints (unchanged)
         public async Task<SpillageSummaryDto> GetSpillageSummaryLast(string projectName, int lastNSprints)
         {
             try
@@ -537,29 +570,35 @@ namespace SRMDevOps.Repo
             }
         }
 
-        // New: aggregate summary for timeframe-based queries (moved from controller)
-        public async Task<SpillageSummaryDto> GetSpillageSummaryTime(string projectName, string timeframe)
+        // Updated: aggregate summary for timeframe-based queries — now supports periodUnit and n
+        public async Task<SpillageSummaryDto> GetSpillageSummaryTime(string projectName, string? periodUnit = null, int? n = null)
         {
             try
             {
-                var statsAll = await GetAllSprintStatsByTime(projectName, timeframe);
-                var statsFeature = await GetFeatureSprintStatsByTime(projectName, timeframe);
-                var statsClient = await GetClientSprintStatsByTime(projectName, timeframe);
+                // Use new period aggregators for each section (All/Feature/Client)
+                var statsAll = await GetSprintStatsByPeriodAsync(projectName, periodUnit, n, null);
+                var statsFeature = await GetSprintStatsByPeriodAsync(projectName, periodUnit, n, "Feature");
+                var statsClient = await GetSprintStatsByPeriodAsync(projectName, periodUnit, n, "Client Issue");
 
-                var timelineAll = await GetAllSpillageTimeline(projectName, timeframe);
-                var timelineFeature = await GetFeatureSpillageTimeline(projectName, timeframe);
-                var timelineClient = await GetClientSpillageTimeline(projectName, timeframe);
+                var spillageAll = await GetSpillageByPeriodAsync(projectName, periodUnit, n, null);
+                var spillageFeature = await GetSpillageByPeriodAsync(projectName, periodUnit, n, "Feature");
+                var spillageClient = await GetSpillageByPeriodAsync(projectName, periodUnit, n, "Client Issue");
 
-                // Fetch histories per section filtered by parentType for feature/client
-                var historyAll = await GetStoryHistoryByTimeframe(projectName, timeframe, null);
-                var historyFeature = await GetStoryHistoryByTimeframe(projectName, timeframe, "Feature");
-                var historyClient = await GetStoryHistoryByTimeframe(projectName, timeframe, "Client Issue");
+                // For histories use same period window; to avoid extra DB calls you may choose to omit history here or make it conditional.
+                // We'll compute history using period->startDate (legacy GetStoryHistoryByTimeframe still exists; to avoid breaking signatures we will compute a startDate and call the timeframe-based history)
+                var (unit, _, defaultN) = NormalizePeriodUnit(periodUnit);
+                var periods = n.HasValue && n.Value > 0 ? n.Value : defaultN;
+                var windowStart = ComputeWindowStart(unit, periods);
+
+                var historyAll = await GetStoryHistoryByStartDate(projectName, windowStart, null);
+                var historyFeature = await GetStoryHistoryByStartDate(projectName, windowStart, "Feature");
+                var historyClient = await GetStoryHistoryByStartDate(projectName, windowStart, "Client Issue");
 
                 var summary = new SpillageSummaryDto
                 {
-                    All = new SectionDto { Stats = statsAll, Spillage = timelineAll, History = historyAll },
-                    Feature = new SectionDto { Stats = statsFeature, Spillage = timelineFeature, History = historyFeature },
-                    Client = new SectionDto { Stats = statsClient, Spillage = timelineClient, History = historyClient }
+                    All = new SectionDto { Stats = statsAll, Spillage = spillageAll, History = historyAll },
+                    Feature = new SectionDto { Stats = statsFeature, Spillage = spillageFeature, History = historyFeature },
+                    Client = new SectionDto { Stats = statsClient, Spillage = spillageClient, History = historyClient }
                 };
 
                 return summary;
@@ -571,7 +610,8 @@ namespace SRMDevOps.Repo
             }
         }
 
-        // New methods implementing the "spillage history per user story" logic.
+        // ---------- History helpers (new overload used above) ----------
+        // Existing methods GetStoryHistoryLastNSprints and GetStoryHistoryByTimeframe remain; add small helper that filters by computed startDate.
 
         public async Task<List<StoryHistoryDto>> GetStoryHistoryLastNSprints(string projectName, int lastNSprints, string? parentType = null)
         {
@@ -610,10 +650,8 @@ namespace SRMDevOps.Repo
 
                 var storyIds = rows.Select(r => r.UserStoryId).Distinct().ToList();
 
-                var countsQuery = _context.IvpUserStoryIterations
-                    .Where(i => storyIds.Contains(i.UserStoryId));
-
-                var counts = await countsQuery
+                var counts = await _context.IvpUserStoryIterations
+                    .Where(i => storyIds.Contains(i.UserStoryId))
                     .GroupBy(i => i.UserStoryId)
                     .Select(g => new { UserStoryId = g.Key, Total = g.Count() })
                     .ToDictionaryAsync(x => x.UserStoryId, x => x.Total);
@@ -648,6 +686,20 @@ namespace SRMDevOps.Repo
             {
                 var startDate = GetStartDate(timeframe);
 
+                return await GetStoryHistoryByStartDate(projectName, startDate, parentType);
+            }
+            catch (Exception e)
+            {
+                Console.WriteLine(e.Message);
+                return new List<StoryHistoryDto>();
+            }
+        }
+
+        // New: history fetch based on explicit startDate (used by period-based summary)
+        private async Task<List<StoryHistoryDto>> GetStoryHistoryByStartDate(string projectName, DateTime startDate, string? parentType = null)
+        {
+            try
+            {
                 var rowsQuery = _context.IvpUserStoryIterations
                     .Join(_context.IvpUserStoryDetails,
                           usi => usi.UserStoryId,
@@ -707,6 +759,36 @@ namespace SRMDevOps.Repo
             {
                 Console.WriteLine(e.Message);
                 return new List<StoryHistoryDto>();
+            }
+        }
+
+        // Debug helper: serialize aggregated contents to Output / Console for inspection
+        private void DebugLogAggregated(IEnumerable<AggregatedStat> aggregated, string context)
+        {
+            try
+            {
+                var items = aggregated
+                    .Select(a => new
+                    {
+                        FullPath = a.FullPath,
+                        Total = a.Total,
+                        Closed = a.Closed,
+                        SortDate = a.SortDate.HasValue ? a.SortDate.Value.ToString("o") : null
+                    })
+                    .ToList();
+
+                var payload = new { Context = context, Count = items.Count, Items = items };
+                var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions { WriteIndented = true });
+
+                // Visible in Visual Studio Output window when running under debugger
+                Debug.WriteLine(json);
+
+                // Also write to Console in non-debug runs (API logs / container stdout)
+                Console.WriteLine(json);
+            }
+            catch
+            {
+                // Swallow any logging errors to avoid breaking behavior
             }
         }
     }

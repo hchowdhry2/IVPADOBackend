@@ -1,7 +1,4 @@
-﻿using Microsoft.AspNetCore.Mvc;
-using SRMDevOps.Dto;
-using SRMDevOps.Repo;
-using System.Collections.Generic;
+﻿using System.Collections.Generic;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using SRMDevOps.Dto;
@@ -21,66 +18,32 @@ namespace SRMDevOps.Controllers
         }
 
         /// <summary>
-        /// Unified summary endpoint.
-        /// - ?lastNSprints=5  -> last-N-sprints mode (takes precedence)
-        /// - ?timeframe=monthly|yearly -> timeframe mode
-        /// - ?n=6 -> used with timeframe=monthly (months) or timeframe=yearly (years)
+        /// Unified summary endpoint. Use query parameters to select mode:
+        /// - ?lastNSprints=5  -> last-N-sprints mode (unchanged)
+        /// - ?periodUnit=monthly|quarterly|yearly & ?n=6 -> timeframe mode where n is number of periods
+        /// If both provided, lastNSprints takes precedence.
+        /// Backwards compatible: ?timeframe=yearly will be treated as periodUnit=yearly with n default.
         /// </summary>
         [HttpGet("summary/{projectName}")]
         public async Task<IActionResult> GetSpillageSummary(
             string projectName,
             [FromQuery] int? lastNSprints,
-            [FromQuery] string? timeframe,
-            [FromQuery] int? n)
+            [FromQuery] string? timeframe, // backward compatibility
+            [FromQuery] string? periodUnit, // "monthly","quarterly","yearly"
+            [FromQuery] int? n) // number of periods (e.g. last 6 months, last 3 quarters)
         {
             // last-N-sprints mode (takes precedence when provided)
-            //if (lastNSprints.HasValue && lastNSprints.Value > 0)
-            //{
-            //    var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
-            //    return Ok(summary);
-            //}
-
-            // timeframe mode
-            var tf = timeframe ?? string.Empty;
-
-            // If monthly/yearly bucketing is requested, call month-bucketing service methods.
-            if (tf.Equals("monthly", System.StringComparison.OrdinalIgnoreCase) ||
-                tf.Equals("yearly", System.StringComparison.OrdinalIgnoreCase) ||
-                tf.Equals("quarterly", System.StringComparison.OrdinalIgnoreCase))
-            {
-                // Sequential calls to avoid concurrent DbContext access
-                var spillageAll = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, null);
-                var spillageFeature = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, "Feature");
-                var spillageClient = await _spillage.GetSpillageByMonthsAsync(projectName, tf, n, "Client Issue");
-
-                var statsAll = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, null);
-                var statsFeature = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, "Feature");
-                var statsClient = await _spillage.GetSprintStatsByMonthsAsync(projectName, tf, n, "Client Issue");
-
-                var historyAll = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, null);
-                var historyFeature = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, "Feature");
-                var historyClient = await _spillage.GetStoryHistoryByTimeframe(projectName, tf, "Client Issue");
-
-
-                var summary = new SpillageSummaryDto
-                {
-                    All = new SectionDto { Stats = statsAll, Spillage = spillageAll, History = historyAll },
-                    Feature = new SectionDto { Stats = statsFeature, Spillage = spillageFeature, History = historyFeature },
-                    Client = new SectionDto { Stats = statsClient, Spillage = spillageClient, History = historyClient }
-                };
-
-                return Ok(summary);
-            }
-
             if (lastNSprints.HasValue && lastNSprints.Value > 0)
             {
                 var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
                 return Ok(summary);
             }
 
-            // Fallback: use existing service summary-by-time behaviour
-            var fallback = await _spillage.GetSpillageSummaryTime(projectName, tf);
-            return Ok(fallback);
+            // Resolve periodUnit: prefer explicit param, else fall back to legacy timeframe
+            var resolvedUnit = string.IsNullOrEmpty(periodUnit) ? timeframe : periodUnit;
+
+            var summaryTime = await _spillage.GetSpillageSummaryTime(projectName, resolvedUnit, n);
+            return Ok(summaryTime);
         }
     }
 }

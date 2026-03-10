@@ -20,17 +20,14 @@ namespace SRMDevOps.Repo
         Task<List<SpillageTrendDto>> GetClientSpillageTrend(string projectName, int lastNSprints);
         Task<List<SpillageTrendDto>> GetClientSpillageTimeline(string projectName, string timeframe);
 
-        // Aggregated business methods (summary) — unchanged
+        // Aggregated business methods (summary) — unchanged for last-N
         Task<SpillageSummaryDto> GetSpillageSummaryLast(string projectName, int lastNSprints);
-        Task<SpillageSummaryDto> GetSpillageSummaryTime(string projectName, string timeframe);
 
-        // New: per-user-story history (added alongside existing summary functionality)
-        // parentType: null for all, "Feature" or "Client Issue" to filter
+        // Updated summary-by-time: supports periodUnit ("monthly","quarterly","yearly") and n = number of periods
+        Task<SpillageSummaryDto> GetSpillageSummaryTime(string projectName, string? periodUnit = null, int? n = null);
+
+        // History helpers
         Task<List<StoryHistoryDto>> GetStoryHistoryLastNSprints(string projectName, int lastNSprints, string? parentType = null);
         Task<List<StoryHistoryDto>> GetStoryHistoryByTimeframe(string projectName, string timeframe, string? parentType = null);
-
-        // new for monthly-yearly
-        Task<List<SpillageTrendDto>> GetSpillageByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null);
-        Task<List<SprintProgressDto>> GetSprintStatsByMonthsAsync(string projectName, string timeframe, int? n = null, string? parentType = null);
     }
 }
