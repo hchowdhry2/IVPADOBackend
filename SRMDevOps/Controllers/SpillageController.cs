@@ -1,36 +1,48 @@
-﻿using System.Collections.Generic;
-using System.Threading.Tasks;
-using Microsoft.AspNetCore.Mvc;
+﻿using Microsoft.AspNetCore.Mvc;
 using SRMDevOps.Dto;
 using SRMDevOps.Repo;
+using System.Collections.Generic;
+using System.Net.Http.Headers;
+using System.Text;
+using System.Text.Json;
+using System.Threading.Tasks;
 
 namespace SRMDevOps.Controllers
 {
+
+    public class TeamDto
+    {
+        public string Id { get; set; }
+        public string Name { get; set; }
+        public string Description { get; set; }
+        public string Url { get; set; }
+    }
+
+    // Wrapper to match the Azure DevOps "value" array structure
+    public class AzureDevOpsResponse<T>
+    {
+        public int Count { get; set; }
+        public List<T> Value { get; set; }
+    }
+
     [Route("api/[controller]")]
     [ApiController]
     public class SpillageController : ControllerBase
     {
         private readonly ISpillage _spillage;
 
-        public SpillageController(ISpillage spillage)
+        public SpillageController(ISpillage spillage, IConfiguration configuration)
         {
             _spillage = spillage;
+            
         }
 
-        /// <summary>
-        /// Unified summary endpoint. Use query parameters to select mode:
-        /// - ?lastNSprints=5  -> last-N-sprints mode (unchanged)
-        /// - ?periodUnit=monthly|quarterly|yearly & ?n=6 -> timeframe mode where n is number of periods
-        /// If both provided, lastNSprints takes precedence.
-        /// Backwards compatible: ?timeframe=yearly will be treated as periodUnit=yearly with n default.
-        /// </summary>
         [HttpGet("summary/{projectName}")]
         public async Task<IActionResult> GetSpillageSummary(
             string projectName,
             [FromQuery] int? lastNSprints,
-            [FromQuery] string? timeframe, // backward compatibility
-            [FromQuery] string? periodUnit, // "monthly","quarterly","yearly"
-            [FromQuery] int? n) // number of periods (e.g. last 6 months, last 3 quarters)
+            [FromQuery] string? timeframe,
+            [FromQuery] int? n) 
         {
             // last-N-sprints mode (takes precedence when provided)
             if (lastNSprints.HasValue && lastNSprints.Value > 0)
@@ -39,10 +51,7 @@ namespace SRMDevOps.Controllers
                 return Ok(summary);
             }
 
-            // Resolve periodUnit: prefer explicit param, else fall back to legacy timeframe
-            var resolvedUnit = string.IsNullOrEmpty(periodUnit) ? timeframe : periodUnit;
-
-            var summaryTime = await _spillage.GetSpillageSummaryTime(projectName, resolvedUnit, n);
+            var summaryTime = await _spillage.GetSpillageSummaryTime(projectName, timeframe, n);
             return Ok(summaryTime);
         }
     }

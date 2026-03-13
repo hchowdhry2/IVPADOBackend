@@ -1,13 +1,20 @@
 using SRMDevOps.DataAccess;
 using SRMDevOps.Repo;
+using System.Text.Json;
 
 var builder = WebApplication.CreateBuilder(args);
 
 // Add services to the container.
 
-builder.Services.AddControllers();
+builder.Services.AddControllers()
+    .AddJsonOptions(options =>
+    {
+        options.JsonSerializerOptions.WriteIndented = true; // Makes JSON "Pretty Printed"
+        options.JsonSerializerOptions.PropertyNamingPolicy = JsonNamingPolicy.CamelCase;
+    });
 builder.Services.AddDbContext<IvpadodashboardContext>();
 builder.Services.AddTransient<ISpillage, SpillageService>();
+builder.Services.AddTransient<IADO, DevopsService>();
 
 builder.Services.AddCors(options =>
     options.AddPolicy(
