@@ -99,16 +99,36 @@ namespace SRMDevOps.Controllers
             }
         }
 
-        [HttpGet("devops-area-paths/{projectId}/{teamId}/{areaPath}/{lastNSprints}")]
-        public async Task<IActionResult> GetProjectSats([FromRoute] string projectId, [FromRoute] string teamId, [FromRoute] string areaPath, [FromRoute] int lastNSprints)
+        // Match the name used in your frontend: devops-iteration-stats
+        [HttpGet("devops-iteration-stats/{projectId}/{teamId}/{*areaPath}")]
+        public async Task<IActionResult> GetProjectStats(
+            [FromRoute] string projectId,
+            [FromRoute] string teamId,
+            [FromRoute] string areaPath,
+            [FromQuery] string? timeframe,
+            [FromQuery] int n)
         {
             try
             {
-                // 1. Fetch the raw JSON from the API
-                List<SprintProgressDto> result = await _adoService.GetSprintDataByAreaPathAsync(projectId,teamId,areaPath,lastNSprints);
+                // 1. Decode the URL encoding
+                // 2. Replace forward slashes (URL style) with backslashes (Database/ADO style)
+                string decodedPath = System.Net.WebUtility.UrlDecode(areaPath).Replace("/", "\\");
 
-                // 3. Return the "Value" list (the actual teams)
-                return Ok(result ?? new List<SprintProgressDto>());
+                // Debugging tip: Log the decodedPath here to ensure it matches your DB: 
+                // e.g., "IVP-SRM\Product Roadmap"
+                Console.WriteLine($"Calculated Area Path: {decodedPath}");
+
+                CombinedSprintDataDto result;
+
+                if (string.IsNullOrEmpty(timeframe))
+                {
+                    result = await _adoService.GetSprintAndSpillageDataAsync(projectId, teamId, decodedPath, lastNSprints: n);
+                    return Ok(result);
+                }
+
+                result = await _adoService.GetSprintStatsByTimeframeAsync(projectId, teamId, decodedPath, timeframe, n);
+
+                return Ok(result ?? new CombinedSprintDataDto());
             }
             catch (Exception ex)
             {
