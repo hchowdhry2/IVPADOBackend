@@ -61,7 +61,7 @@ namespace SRMDevOps.Controllers
         {
             // 1. Fetch ADO definitions (Dates and Paths)
             var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
-            if(!string.IsNullOrEmpty(timeframe))
+            if(string.IsNullOrEmpty(timeframe))
             {
                 var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: n);
                 var results = await _spillage.GetFullSummaryAsync(areaPaths, sprints);

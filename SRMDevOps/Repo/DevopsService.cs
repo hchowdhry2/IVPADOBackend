@@ -14,9 +14,10 @@ namespace SRMDevOps.Repo
         private readonly string _baseUrl = "https://dev.azure.com/Indusvalleypartners";
         private readonly IvpadodashboardContext _context;
 
-        public DevopsService(IConfiguration configuration)
+        public DevopsService(IConfiguration configuration,IvpadodashboardContext context)
         {
             _configuration = configuration;
+            _context = context;
         }
 
 
@@ -195,7 +196,11 @@ namespace SRMDevOps.Repo
             var teamAreaPaths = await GetTeamAreaPathsAsync(projectId, teamId);
             var allSprints = await GetRecentSprintsAsync(projectId, teamId);
 
-            var result = new CombinedSprintDataDto();
+            var result = new CombinedSprintDataDto
+            {
+                Stats = new List<SprintProgressDto>(),
+                Spillage = new List<SpillageTrendDto>()
+            };
 
             // 3. Process each period bucket
             for (int p = 0; p < periods; p++)
