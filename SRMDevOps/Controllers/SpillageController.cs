@@ -57,17 +57,22 @@ namespace SRMDevOps.Controllers
         //}
 
         [HttpGet]
-        public async Task<IActionResult> GetStats(string projectId, string teamId, int lastN = 6)
+        public async Task<IActionResult> GetStats(string projectId, string teamId,string? timeframe, int n = 6)
         {
             // 1. Fetch ADO definitions (Dates and Paths)
             var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
-            var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastN);
+            if(!string.IsNullOrEmpty(timeframe))
+            {
+                var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: n);
+                var results = await _spillage.GetFullSummaryAsync(areaPaths, sprints);
 
-            // 2. Pass those to your SpillageService for the SQL calculation
-            // This removes the need for Regex or guessing dates in the DB
-            var results = await _spillage.GetFullSummaryAsync(areaPaths, sprints);
+                return Ok(results);
+            }
 
-            return Ok(results);
+            var result = await _devops.GetAggregatedTeamStatsAsync(projectId, teamId, timeframe, n);
+
+            return Ok(result ?? new CombinedSprintDataDto());
+
         }
     }
 }
