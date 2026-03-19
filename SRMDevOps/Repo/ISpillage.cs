@@ -1,5 +1,6 @@
 ﻿using Microsoft.AspNetCore.Mvc;
 using SRMDevOps.Dto;
+using static SRMDevOps.Repo.DevopsService;
 
 namespace SRMDevOps.Repo
 {
