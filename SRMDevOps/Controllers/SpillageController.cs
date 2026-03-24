@@ -1,4 +1,5 @@
 ﻿using Microsoft.AspNetCore.Mvc;
+using Microsoft.VisualBasic;
 using SRMDevOps.Dto;
 using SRMDevOps.Repo;
 using System.Collections.Generic;
@@ -10,14 +11,6 @@ using static SRMDevOps.Repo.DevopsService;
 
 namespace SRMDevOps.Controllers
 {
-
-    public class TeamDto
-    {
-        public string Id { get; set; }
-        public string Name { get; set; }
-        public string Description { get; set; }
-        public string Url { get; set; }
-    }
 
     // Wrapper to match the Azure DevOps "value" array structure
     public class AzureDevOpsResponse<T>
@@ -39,45 +32,91 @@ namespace SRMDevOps.Controllers
             _devops = devops;
         }
 
-        //[HttpGet("summary/{projectName}")]
-        //public async Task<IActionResult> GetSpillageSummary(
-        //    string projectName,
-        //    [FromQuery] int? lastNSprints,
-        //    [FromQuery] string? timeframe,
-        //    [FromQuery] int? n) 
-        //{
-        //    // last-N-sprints mode (takes precedence when provided)
-        //    if (lastNSprints.HasValue && lastNSprints.Value > 0)
-        //    {
-        //        var summary = await _spillage.GetSpillageSummaryLast(projectName, lastNSprints.Value);
-        //        return Ok(summary);
-        //    }
-
-        //    var summaryTime = await _spillage.GetSpillageSummaryTime(projectName, timeframe, n);
-        //    return Ok(summaryTime);
-        //}
-
         [HttpGet]
-        public async Task<IActionResult> GetStats(string projectId, string teamId,string? timeframe, int n = 6)
+        public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
         {
-            // 1. Fetch ADO definitions (Dates and Paths)
             var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
-            if(string.IsNullOrEmpty(timeframe))
-            {
-                var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: n);
-                var results = await _spillage.GetFullSummaryAsync(areaPaths, sprints);
 
+            // Get only the sprints that have actually started
+            var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
+
+            if (string.IsNullOrEmpty(timeframe))
+            {
+                // Sprint-wise view (take exactly 'n')
+                var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
                 return Ok(results);
             }
 
-            var result = await _devops.GetAggregatedTeamStatsAsync(projectId, teamId, timeframe, n);
-
-            return Ok(result ?? new CombinedSprintDataDto());
-
+            // Monthly/Quarterly view
+            var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints);
+            return Ok(result ?? new SpillageSummaryDto());
         }
     }
 }
 
+//[HttpGet]
+//public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
+//{
+//    // 1. Fetch Area Paths (Metadata)
+//    var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
+
+//    // 2. DYNAMIC FETCH LOGIC
+//    // If timeframe is null, we just want 'n' individual sprints.
+//    // If monthly/quarterly, we need more sprints to fill the buckets.
+//    int fetchCount = n;
+
+//    if (!string.IsNullOrEmpty(timeframe))
+//    {
+//        // We calculate a multiplier to ensure we get enough data:
+//        // Monthly: ~3 sprints per month, Quarterly: ~8 sprints per quarter
+//int multiplier = timeframe.ToLower() switch
+//{
+//    "quarter" or "quarterly" => 8,
+//    "year" or "yearly" => 28,
+//    _ => 3 // Default for monthly
+//};
+//fetchCount = n* multiplier;
+//    }
+
+//    // 3. Fetch the sprints using the calculated count
+//    var adoSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount);
+
+//    // 4. Handle Standard View (Individual Sprints)
+//    if (string.IsNullOrEmpty(timeframe))
+//    {
+//        var limitedSprints = adoSprints.Take(n).ToList();
+//        var results = await _spillage.GetFullSummaryAsync(areaPaths, limitedSprints);
+//        return Ok(results);
+//    }
+
+//    // 5. Handle Aggregated View (Monthly/Quarterly)
+//    // The service now has a "large pool" of sprints to group into months
+//    var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, adoSprints);
+
+//    return Ok(result ?? new SpillageSummaryDto());
+//}
+
+//[HttpGet]
+//public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
+//{
+//    // 1. Fetch ADO definitions (Dates and Paths)
+//    var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
+//    var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: n);
+//    if (string.IsNullOrEmpty(timeframe))
+//    {
+//        //var sprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: n);
+//        var results = await _spillage.GetFullSummaryAsync(areaPaths, sprints);
+
+//        return Ok(results);
+//    }
+
+//    //var result = await _devops.GetAggregatedTeamStatsAsync(projectId, teamId, timeframe, n);
+//    var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, sprints);
+
+//    //return Ok(result ?? new CombinedSprintDataDto());
+//    return Ok(result ?? new SpillageSummaryDto());
+
+//}
 
 
 //using System.Collections.Generic;

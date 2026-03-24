@@ -12,6 +12,10 @@ namespace SRMDevOps.Repo
         Task<List<StoryHistoryDto>> GetStoryHistoryAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType = null);
         Task<SpillageSummaryDto> GetFullSummaryAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints);
 
+        Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(string? timeframe,int n,List<string> adoAreaPaths, List<SprintDto> adoSprints);
+
+        Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n);
+
         //// Aggregated business methods (summary) — unchanged for last-N
         //Task<SpillageSummaryDto> GetSpillageSummaryLast(string projectName, int lastNSprints);
 

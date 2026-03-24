@@ -216,87 +216,89 @@ namespace SRMDevOps.Repo
         }
 
 
-        public async Task<CombinedSprintDataDto> GetAggregatedTeamStatsAsync(
-    string projectId,
-    string teamId,
-    string? timeframe,
-    int n)
-        {
-            var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
-            var periods = n > 0 ? n : defaultN;
-            var windowStart = ComputeWindowStart(unit, periods);
+    //    public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
+    //string projectId,
+    //string teamId,
+    //string? timeframe,
+    //int n)
+    //    {
+    //        var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
+    //        var periods = n > 0 ? n : defaultN;
+    //        var windowStart = ComputeWindowStart(unit, periods);
 
-            var teamAreaPaths = await GetTeamAreaPathsAsync(projectId, teamId);
-            var allSprints = await GetRecentSprintsAsync(projectId, teamId);
+    //        var teamAreaPaths = await GetTeamAreaPathsAsync(projectId, teamId);
+    //        var allSprints = await GetRecentSprintsAsync(projectId, teamId);
 
-            var result = new CombinedSprintDataDto
-            {
-                Stats = new List<SprintProgressDto>(),
-                Spillage = new List<SpillageTrendDto>()
-            };
+    //        var result = new CombinedSprintDataDto
+    //        {
+    //            Stats = new List<SprintProgressDto>(),
+    //            Spillage = new List<SpillageTrendDto>()
+    //        };
 
-            for (int p = 0; p < periods; p++)
-            {
-                var periodStart = windowStart.AddMonths(p * bucketMonths);
-                var periodEnd = periodStart.AddMonths(bucketMonths);
+    //        for (int p = 0; p < periods; p++)
+    //        {
+    //            var periodStart = windowStart.AddMonths(p * bucketMonths);
+    //            var periodEnd = periodStart.AddMonths(bucketMonths);
 
-                var sprintsInBucket = allSprints
-                    .Where(s => s.Attributes.StartDate >= periodStart && s.Attributes.StartDate < periodEnd)
-                    .ToList();
+    //            var sprintsInBucket = allSprints
+    //                .Where(s => s.Attributes.StartDate >= periodStart && s.Attributes.StartDate < periodEnd)
+    //                .ToList();
 
-                double bucketTotal = 0;
-                double bucketMidSprint = 0;
-                double bucketCompleted = 0;
+    //            double bucketTotal = 0;
+    //            double bucketMidSprint = 0;
+    //            double bucketCompleted = 0;
 
-                foreach (var areaPath in teamAreaPaths)
-                {
-                    foreach (var sprint in sprintsInBucket)
-                    {
-                        if (sprint.Attributes.FinishDate.HasValue && sprint.Attributes.StartDate.HasValue)
-                        {
-                            // Helper returns (Total, MidSprint, Completed)
-                            var dbData = await GetSprintDataFromDbAsync(
-                                sprint.Path,
-                                areaPath,
-                                sprint.Attributes.StartDate.Value,
-                                sprint.Attributes.FinishDate.Value);
+    //            foreach (var areaPath in teamAreaPaths)
+    //            {
+    //                foreach (var sprint in sprintsInBucket)
+    //                {
+    //                    if (sprint.Attributes.FinishDate.HasValue && sprint.Attributes.StartDate.HasValue)
+    //                    {
+    //                        // Helper returns (Total, MidSprint, Completed)
+    //                        var dbData = await GetSprintDataFromDbAsync(
+    //                            sprint.Path,
+    //                            areaPath,
+    //                            sprint.Attributes.StartDate.Value,
+    //                            sprint.Attributes.FinishDate.Value);
 
-                            bucketTotal += dbData.Total;
-                            bucketMidSprint += dbData.MidSprint;
-                            bucketCompleted += dbData.Completed;
-                        }
-                    }
-                }
+    //                        bucketTotal += dbData.Total;
+    //                        bucketMidSprint += dbData.MidSprint;
+    //                        bucketCompleted += dbData.Completed;
+    //                    }
+    //                }
+    //            }
 
-                // Inside the period bucket loop, after the foreach loops:
+    //            // Inside the period bucket loop, after the foreach loops:
 
-                string label = unit switch
-                {
-                    "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
-                    "yearly" => periodStart.ToString("yyyy"),
-                    _ => periodStart.ToString("MMM yyyy")
-                };
+    //            string label = unit switch
+    //            {
+    //                "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
+    //                "yearly" => periodStart.ToString("yyyy"),
+    //                _ => periodStart.ToString("MMM yyyy")
+    //            };
 
-                // Map the raw variables directly to the DTO
-                result.Stats.Add(new SprintProgressDto
-                {
-                    IterationPath = label,
-                    TotalPointsAssigned = bucketTotal,        // The raw Total from DB
-                    MidSprintAddedPoints = bucketMidSprint,   // The raw Mid-Sprint from DB
-                    TotalPointsCompleted = bucketCompleted,   // The raw Completed from DB
-                    SortDate = periodStart
-                });
+    //            // Map the raw variables directly to the DTO
+    //            result.Stats.Add(new SprintProgressDto
+    //            {
+    //                IterationPath = label,
+    //                TotalPointsAssigned = bucketTotal,        // The raw Total from DB
+    //                MidSprintAddedPoints = bucketMidSprint,   // The raw Mid-Sprint from DB
+    //                TotalPointsCompleted = bucketCompleted,   // The raw Completed from DB
+    //                SortDate = periodStart
+    //            });
 
-                result.Spillage.Add(new SpillageTrendDto
-                {
-                    IterationPath = label,
-                    SpillagePoints = bucketTotal - bucketCompleted,
-                    SortDate = periodStart
-                });
-            }
+    //            result.Spillage.Add(new SpillageTrendDto
+    //            {
+    //                IterationPath = label,
+    //                SpillagePoints = bucketTotal - bucketCompleted,
+    //                SortDate = periodStart
+    //            });
+    //        }
 
-            return result;
-        }
+    //        return result;
+    //    }
+
+
 
         public class AzureDevOpsResponse<T>
         {
