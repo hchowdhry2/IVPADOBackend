@@ -13,11 +13,11 @@ namespace SRMDevOps.Repo
             string projectId,
             string teamId,
             int lastNSprints);
-        Task<CombinedSprintDataDto> GetAggregatedTeamStatsAsync(
-        string projectId,
-        string teamId,
-        string? timeframe,
-        int n);
+        //Task<CombinedSprintDataDto> GetAggregatedTeamStatsAsync(
+        //string projectId,
+        //string teamId,
+        //string? timeframe,
+        //int n);
 
         Task<List<Identity>> GetTeamMembersAsync(string projectId, string teamId);
 
