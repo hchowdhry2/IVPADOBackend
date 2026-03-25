@@ -15,7 +15,7 @@ namespace SRMDevOps.Repo
         private readonly string _baseUrl = "https://dev.azure.com/Indusvalleypartners";
         private readonly IvpadodashboardContext _context;
 
-        public DevopsService(IConfiguration configuration,IvpadodashboardContext context)
+        public DevopsService(IConfiguration configuration, IvpadodashboardContext context)
         {
             _configuration = configuration;
             _context = context;
@@ -142,7 +142,11 @@ namespace SRMDevOps.Repo
         }
 
         // Helper to perform the DB calculation based on Sprint End Date
-        private async Task<(double Assigned, double Completed)> GetSprintDataFromDbAsync(string iterationPath, string areaPath, DateTime sprintEnd)
+        private async Task<(double Total, double MidSprint, double Completed)> GetSprintDataFromDbAsync(
+    string iterationPath,
+    string areaPath,
+    DateTime sprintStart, // Added this parameter
+    DateTime sprintEnd)
         {
             var doneStates = new[] { "Closed", "Done", "Verified", "Completed", "Live" };
 
@@ -152,18 +156,49 @@ namespace SRMDevOps.Repo
                     usd => usd.UserStoryId,
                     (usi, usd) => new { usi, usd })
                 .Where(c => c.usi.IterationPath == iterationPath && c.usd.AreaPath == areaPath)
-                .Select(x => new { x.usd.StoryPoints, x.usd.ClosedDate, x.usd.State })
+                .Select(x => new { x.usd.StoryPoints, x.usd.ClosedDate, x.usd.State, x.usi.AssignedDate })
                 .ToListAsync();
 
-            double assigned = dbStories.Sum(x => x.StoryPoints ?? 0);
+            // Logic: If assigned AFTER the first day, it's Mid-Sprint
+            double midSprint = dbStories
+                .Where(x => x.AssignedDate.Date > sprintStart.Date)
+                .Sum(x => x.StoryPoints ?? 0);
+
+            double total = dbStories.Sum(x => x.StoryPoints ?? 0);
+            double initial = total - midSprint;
+
             double completed = dbStories
                 .Where(x => !string.IsNullOrEmpty(x.State) &&
                             doneStates.Contains(x.State, StringComparer.OrdinalIgnoreCase) &&
                             x.ClosedDate.HasValue && x.ClosedDate.Value.Date <= sprintEnd.Date)
                 .Sum(x => x.StoryPoints ?? 0);
 
-            return (assigned, completed);
+            return (total, midSprint, completed);
         }
+
+        //private async Task<(double Assigned, double Completed)> GetSprintDataFromDbAsync(string iterationPath, string areaPath, DateTime sprintEnd)
+        //{
+        //    var doneStates = new[] { "Closed", "Done", "Verified", "Completed", "Live" };
+
+        //    var dbStories = await _context.IvpUserStoryIterations
+        //        .Join(_context.IvpUserStoryDetails,
+        //            usi => usi.UserStoryId,
+        //            usd => usd.UserStoryId,
+        //            (usi, usd) => new { usi, usd })
+        //        .Where(c => c.usi.IterationPath == iterationPath && c.usd.AreaPath == areaPath)
+        //        .Select(x => new { x.usd.StoryPoints, x.usd.ClosedDate, x.usd.State })
+        //        .ToListAsync();
+
+        //    double assigned = dbStories.Sum(x => x.StoryPoints ?? 0);
+        //    double completed = dbStories
+        //        .Where(x => !string.IsNullOrEmpty(x.State) &&
+        //                    doneStates.Contains(x.State, StringComparer.OrdinalIgnoreCase) &&
+        //                    x.ClosedDate.HasValue && x.ClosedDate.Value.Date <= sprintEnd.Date)
+        //        .Sum(x => x.StoryPoints ?? 0);
+
+        //    return (assigned, completed);
+        //}
+
 
         // --- RESTORED ADO FUNCTIONALITIES ---
 
@@ -188,12 +223,10 @@ namespace SRMDevOps.Repo
     string? timeframe,
     int n)
         {
-            // 1. Setup timeframe boundaries (Monthly/Quarterly/Yearly)
             var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
             var periods = n > 0 ? n : defaultN;
             var windowStart = ComputeWindowStart(unit, periods);
 
-            // 2. Fetch Team Metadata from ADO
             var teamAreaPaths = await GetTeamAreaPathsAsync(projectId, teamId);
             var allSprints = await GetRecentSprintsAsync(projectId, teamId);
 
@@ -203,36 +236,41 @@ namespace SRMDevOps.Repo
                 Spillage = new List<SpillageTrendDto>()
             };
 
-            // 3. Process each period bucket
             for (int p = 0; p < periods; p++)
             {
                 var periodStart = windowStart.AddMonths(p * bucketMonths);
                 var periodEnd = periodStart.AddMonths(bucketMonths);
 
-                // Find sprints that fall into this timeframe bucket
                 var sprintsInBucket = allSprints
                     .Where(s => s.Attributes.StartDate >= periodStart && s.Attributes.StartDate < periodEnd)
                     .ToList();
 
-                double bucketAssigned = 0;
+                double bucketTotal = 0;
+                double bucketMidSprint = 0;
                 double bucketCompleted = 0;
 
-                // 4. AGGREGATE: Loop through every Area Path and every Sprint in this bucket
                 foreach (var areaPath in teamAreaPaths)
                 {
                     foreach (var sprint in sprintsInBucket)
                     {
-                        if (sprint.Attributes.FinishDate.HasValue)
+                        if (sprint.Attributes.FinishDate.HasValue && sprint.Attributes.StartDate.HasValue)
                         {
-                            // Use the helper to query your DB
-                            var dbData = await GetSprintDataFromDbAsync(sprint.Path, areaPath, sprint.Attributes.FinishDate.Value);
-                            bucketAssigned += dbData.Assigned;
+                            // Helper returns (Total, MidSprint, Completed)
+                            var dbData = await GetSprintDataFromDbAsync(
+                                sprint.Path,
+                                areaPath,
+                                sprint.Attributes.StartDate.Value,
+                                sprint.Attributes.FinishDate.Value);
+
+                            bucketTotal += dbData.Total;
+                            bucketMidSprint += dbData.MidSprint;
                             bucketCompleted += dbData.Completed;
                         }
                     }
                 }
 
-                // 5. Generate Label (e.g., "Jan 2026")
+                // Inside the period bucket loop, after the foreach loops:
+
                 string label = unit switch
                 {
                     "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
@@ -240,8 +278,22 @@ namespace SRMDevOps.Repo
                     _ => periodStart.ToString("MMM yyyy")
                 };
 
-                result.Stats.Add(new SprintProgressDto { IterationPath = label, TotalPointsAssigned = bucketAssigned, TotalPointsCompleted = bucketCompleted, SortDate = periodStart });
-                result.Spillage.Add(new SpillageTrendDto { IterationPath = label, SpillagePoints = bucketAssigned - bucketCompleted, SortDate = periodStart });
+                // Map the raw variables directly to the DTO
+                result.Stats.Add(new SprintProgressDto
+                {
+                    IterationPath = label,
+                    TotalPointsAssigned = bucketTotal,        // The raw Total from DB
+                    MidSprintAddedPoints = bucketMidSprint,   // The raw Mid-Sprint from DB
+                    TotalPointsCompleted = bucketCompleted,   // The raw Completed from DB
+                    SortDate = periodStart
+                });
+
+                result.Spillage.Add(new SpillageTrendDto
+                {
+                    IterationPath = label,
+                    SpillagePoints = bucketTotal - bucketCompleted,
+                    SortDate = periodStart
+                });
             }
 
             return result;
@@ -321,24 +373,24 @@ namespace SRMDevOps.Repo
     //    }
     }
 
-    public class AzureDevOpsResponse<T>
-    {
-        public int Count { get; set; }
-        public List<T> Value { get; set; }
-    }
+        public class AzureDevOpsResponse<T>
+        {
+            public int Count { get; set; }
+            public List<T> Value { get; set; }
+        }
 
-    public class SprintDto
-    {
-        public string Name { get; set; }
-        public string Path { get; set; }
-        public Attributes Attributes { get; set; }
-    }
+        public class SprintDto
+        {
+            public string Name { get; set; }
+            public string Path { get; set; }
+            public Attributes Attributes { get; set; }
+        }
 
-    public class Attributes
-    {
-        public DateTime? StartDate { get; set; }
-        public DateTime? FinishDate { get; set; }
-    }
+        public class Attributes
+        {
+            public DateTime? StartDate { get; set; }
+            public DateTime? FinishDate { get; set; }
+        }
 
     public class CombinedSprintDataDto
     {

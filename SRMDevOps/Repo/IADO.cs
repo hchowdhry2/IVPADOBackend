@@ -1,5 +1,6 @@
 ﻿using SRMDevOps.Controllers;
 using SRMDevOps.Dto;
+using static SRMDevOps.Repo.DevopsService;
 
 namespace SRMDevOps.Repo
 {

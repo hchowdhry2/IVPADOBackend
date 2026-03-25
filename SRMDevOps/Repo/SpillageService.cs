@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft.EntityFrameworkCore;
 using SRMDevOps.DataAccess;
 using SRMDevOps.Dto;
+using static SRMDevOps.Repo.DevopsService;
 
 namespace SRMDevOps.Repo
 {
