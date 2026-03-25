@@ -20,20 +20,21 @@ namespace SRMDevOps.Repo
             _devops = devops;
         }
 
-        private sealed record AggregatedStat(string FullPath, double Total, double AddedLater, double Closed, 
+        // Private aggregate holder to return from in-memory mapping
+        private sealed record AggregatedStat(string FullPath, double Total, double AddedLater, double Closed,
                  DateTime? SortDate);
 
         /// <summary>
         /// Internal DB Aggregator: Only returns data for iterations that exist in the DB.
         /// </summary>
-        /// 
-
         private async Task<List<AggregatedStat>> GetAggregatedStatsAsync(
-    List<string> adoAreaPaths,
-    Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
-    string? parentType = null)
+            List<string> adoAreaPaths,
+            Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+            string? parentType = null)
         {
             var iterationPaths = sprintDateMap.Keys.ToList();
+
+            var validTypes = new[] { "Feature", "Client Issue" };
 
             var query = _context.IvpUserStoryIterations
                 .Join(_context.IvpUserStoryDetails,
@@ -41,15 +42,19 @@ namespace SRMDevOps.Repo
                     usd => usd.UserStoryId,
                     (usi, usd) => new { usi, usd })
                 .Where(c => iterationPaths.Contains(c.usi.IterationPath) &&
-                            adoAreaPaths.Contains(c.usd.AreaPath));
+                            adoAreaPaths.Contains(c.usd.AreaPath) &&
+                            c.usd.ParentType != null);
 
-            //if (!string.IsNullOrEmpty(parentType) && !string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
-            //    query = query.Where(c => c.usd.ParentType == parentType);
-            if (!string.IsNullOrEmpty(parentType) && !string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
-{
-    // Use .ToLower() or Equals with StringComparison for the filter
-    query = query.Where(c => c.usd.ParentType.ToLower() == parentType.ToLower());
-}
+            // 2. If parentType is "all", restrict it to ONLY your two categories
+            if (string.IsNullOrEmpty(parentType) || string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
+            {
+                query = query.Where(c => validTypes.Contains(c.usd.ParentType));
+            }
+            else
+            {
+                // 3. Otherwise, filter by the specific type requested (Feature or Client Issue)
+                query = query.Where(c => c.usd.ParentType.ToLower() == parentType.ToLower());
+            }
 
             // FIX: Include AssignedDate in the select
             var rawData = await query.Select(x => new {
@@ -59,22 +64,62 @@ namespace SRMDevOps.Repo
                 x.usd.ClosedDate
             }).ToListAsync();
 
+            //return rawData
+                //.GroupBy(x => x.IterationPath)
+                //.Select(g =>
+                //{
+                //    var path = g.Key ?? string.Empty;
+                //    if (!sprintDateMap.TryGetValue(path, out var dates))
+                //        return new AggregatedStat(path, 0, 0, 0, null);
+
+                //    // 1. FIX: Set the cutoff to the very beginning of the DAY AFTER the sprint ends
+                //    // If Sprint ends March 27, this becomes March 28, 00:00:00
+                //    var startLimit = dates.Start.Date;
+                //    var endLimitThreshold = dates.End.Date.AddDays(1);
+
+                //    // 2. Completed Points: Capture everything up to the last millisecond of the end date
+                //    var completedPoints = g.Where(x => x.ClosedDate.HasValue &&
+                //                                       x.ClosedDate.Value < endLimitThreshold) // < March 28
+                //                           .Sum(x => x.StoryPoints ?? 0);
+
+                //    // 3. Mid-Sprint Added: Capture everything that happened AFTER the start day began
+                //    //var addedLaterPoints = g.Where(x => x.AssignedDate.Date > startLimit)
+                //    //                        .Sum(x => x.StoryPoints ?? 0);
+
+                //    // Capture stories assigned even one second after the sprint start
+                //    var addedLaterPoints = g.Where(x => x.AssignedDate > dates.Start)
+                //                            .Sum(x => x.StoryPoints ?? 0);
+
+                //    var totalPoints = g.Sum(x => x.StoryPoints ?? 0);
+
+                //    return new AggregatedStat(
+                //        path,
+                //        totalPoints,
+                //        addedLaterPoints,
+                //        completedPoints,
+                //        dates.Start
+                //    );
+                //})
+                //.ToList();
+
             return rawData
                 .GroupBy(x => x.IterationPath)
-                .Select(g => {
+                .Select(g =>
+                {
                     var path = g.Key ?? string.Empty;
                     if (!sprintDateMap.TryGetValue(path, out var dates))
                         return new AggregatedStat(path, 0, 0, 0, null);
 
+                    // Using Local Date parts for comparison
                     var startLimit = dates.Start.Date;
                     var endLimit = dates.End.Date;
 
-                    // 1. Completed Points
+                    // 1. Completed Points: Capture everything closed on or before the end date (Local)
                     var completedPoints = g.Where(x => x.ClosedDate.HasValue &&
                                                        x.ClosedDate.Value.Date <= endLimit)
                                            .Sum(x => x.StoryPoints ?? 0);
 
-                    // 2. Mid-Sprint Added Points (Logic: AssignedDate > Sprint Start Date)
+                    // 2. Mid-Sprint Added Points (Logic: AssignedDate > Sprint Start Date - Local)
                     var addedLaterPoints = g.Where(x => x.AssignedDate.Date > startLimit)
                                             .Sum(x => x.StoryPoints ?? 0);
 
@@ -84,21 +129,22 @@ namespace SRMDevOps.Repo
 
                     return new AggregatedStat(
                         path,
-                        totalPoints, // We now treat "Total" as "Initially Assigned"
-                        addedLaterPoints, // Pass the new metric
+                        totalPoints, // Total points assigned to the sprint
+                        addedLaterPoints, // Points added after the start date
                         completedPoints,
                         dates.Start
                     );
                 })
                 .ToList();
         }
-        
+
         public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType = null)
         {
             try
             {
                 if (adoSprints == null || !adoSprints.Any()) return new List<SprintProgressDto>();
 
+                // Convert API Sprint list to a dictionary (Local times)
                 var dateMap = adoSprints.ToDictionary(
                     s => s.Path,
                     s => (s.Attributes.StartDate.Value, s.Attributes.FinishDate.Value),
@@ -116,7 +162,6 @@ namespace SRMDevOps.Repo
                         TotalPointsAssigned = dbMatch?.Total ?? 0,
                         MidSprintAddedPoints = dbMatch?.AddedLater ?? 0,
                         TotalPointsCompleted = dbMatch?.Closed ?? 0,
-                        
                         SortDate = s.Attributes.StartDate
                     };
                 })
@@ -178,7 +223,8 @@ namespace SRMDevOps.Repo
                         usd => usd.UserStoryId,
                         (usi, usd) => new { usi, usd })
                     .Where(x => adoAreaPaths.Contains(x.usd.AreaPath) &&
-                                sprintPaths.Contains(x.usi.IterationPath));
+                                sprintPaths.Contains(x.usi.IterationPath) &&
+                                x.usd.ParentType != null);
 
                 if (!string.IsNullOrEmpty(parentType) && !string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
                     rowsQuery = rowsQuery.Where(x => x.usd.ParentType == parentType);
@@ -197,6 +243,7 @@ namespace SRMDevOps.Repo
 
                 if (!rows.Any()) return new List<StoryHistoryDto>();
 
+                // 3. Spillage Count: How many times has this story appeared in ANY iteration?
                 var storyIds = rows.Select(r => r.UserStoryId).Distinct().ToList();
                 var counts = await _context.IvpUserStoryIterations
                     .Where(i => storyIds.Contains(i.UserStoryId))
@@ -204,6 +251,7 @@ namespace SRMDevOps.Repo
                     .Select(g => new { UserStoryId = g.Key, Total = g.Count() })
                     .ToDictionaryAsync(x => x.UserStoryId, x => x.Total);
 
+                // 4. Map to DTO
                 return rows.Select(r => new StoryHistoryDto
                 {
                     UserStoryId = r.UserStoryId,
@@ -225,27 +273,19 @@ namespace SRMDevOps.Repo
             }
         }
 
-
         // for monthly/quarterly timeframe
-
         public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
-    string? timeframe,
-    int n,
-    //string projectId, // Ensure
-    //string teamId,
-    List<string> adoAreaPaths,
-    List<SprintDto> adoSprints)
-    //IADO devopsService)
+            string? timeframe,
+            int n,
+            List<string> adoAreaPaths,
+            List<SprintDto> adoSprints)
         {
             // 1. Get the timeframe boundaries
             var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
             var periods = n > 0 ? n : defaultN;
             var windowStart = ComputeWindowStart(unit, periods);
 
-            //var extendedSprints = await devopsService.GetRecentSprintsAsync(projectId, teamId, lastNSprints: 40);
-
             // 2. CRITICAL: Get the "Working" Sprint-wise data first
-            // Since you said this data is correct, we use it as our "Source of Truth"
             var rawSummary = await GetFullSummaryAsync(adoAreaPaths, adoSprints);
 
             var result = new SpillageSummaryDto();
@@ -262,9 +302,8 @@ namespace SRMDevOps.Repo
 
                 for (int p = 0; p < periods; p++)
                 {
-                    // 1. Force the bucket to start at exactly 00:00:00 UTC
+                    // 1. Force the bucket to start at exactly 00:00:00 Local
                     var periodStart = windowStart.AddMonths(p * bucketMonths).Date;
-                    periodStart = DateTime.SpecifyKind(periodStart, DateTimeKind.Utc);
                     var periodEnd = periodStart.AddMonths(bucketMonths);
 
                     string label = unit switch
@@ -274,20 +313,21 @@ namespace SRMDevOps.Repo
                         _ => periodStart.ToString("MMM yyyy")
                     };
 
-                    // 2. IMPORTANT: Normalize the sprint date to UTC BEFORE comparing
-                    // This ensures the Aug 11 sprint is always >= Aug 1
+                    // 2. IMPORTANT: Normalize the sprint date to Local BEFORE comparing
                     var inBucket = rawSection.Stats
-                        .Where(s => {
-                            if (!s.SortDate.HasValue) return false;
-                            var sDate = s.SortDate.Value.ToUniversalTime().Date;
-                            return sDate >= periodStart && sDate < periodEnd;
-                        })
-                        .ToList();
+                    .Where(s => {
+                        if (!s.SortDate.HasValue) return false;
+
+                        // Treat date as Local
+                        var sDate = s.SortDate.Value.Date;
+                        return sDate >= periodStart && sDate < periodEnd;
+                    })
+                    .ToList();
 
                     var inBucketSpillage = rawSection.Spillage
                         .Where(s => {
                             if (!s.SortDate.HasValue) return false;
-                            var sDate = s.SortDate.Value.ToUniversalTime().Date;
+                            var sDate = s.SortDate.Value.Date;
                             return sDate >= periodStart && sDate < periodEnd;
                         })
                         .ToList();
@@ -319,81 +359,6 @@ namespace SRMDevOps.Repo
                 Client = AggregateSection(rawSummary.Client)
             };
         }
-    //    public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
-    //string? timeframe,
-    //int n,
-    //List<string> adoAreaPaths,
-    //List<SprintDto> adoSprints)
-    //    {
-    //        // 1. Identify timeframe (Monthly, Quarterly, etc.)
-    //        var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
-    //        var periods = n > 0 ? n : defaultN;
-    //        var windowStart = ComputeWindowStart(unit, periods);
-
-    //        // 2. Helper to group your existing raw data into time buckets
-    //        async Task<SectionDto> GetSectionData(string type)
-    //        {
-    //            // CALL YOUR EXISTING WORKING CODE
-    //            var stats = await GetSprintStatsAsync(adoAreaPaths, adoSprints, type);
-    //            var spillage = await GetSpillageTrendAsync(adoAreaPaths, adoSprints, type);
-    //            var history = await GetStoryHistoryAsync(adoAreaPaths, adoSprints, type);
-
-    //            var section = new SectionDto { Stats = new(), Spillage = new(), History = history };
-
-    //            for (int p = 0; p < periods; p++)
-    //            {
-    //                var periodStart = windowStart.AddMonths(p * bucketMonths).Date;
-    //                var periodEnd = periodStart.AddMonths(bucketMonths).Date;
-
-    //                string label = unit switch
-    //                {
-    //                    "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
-    //                    "yearly" => periodStart.ToString("yyyy"),
-    //                    _ => periodStart.ToString("MMM yyyy")
-    //                };
-
-    //                var sprintsInThisMonth = adoSprints
-    //        .Where(s => s.Attributes.StartDate.HasValue &&
-    //                    s.Attributes.StartDate.Value.Date >= periodStart.Date &&
-    //                    s.Attributes.StartDate.Value.Date < periodEnd.Date)
-    //        .Select(s => s.Name) // Get the Names (e.g., "SPRINT 11 Aug...")
-    //        .ToList();
-
-    //                // Logic: Filter sprints that START in this month
-    //                var inBucketStats = stats.Where(x => x.SortDate.HasValue &&
-    //                    x.SortDate.Value.Date >= periodStart &&
-    //                    x.SortDate.Value.Date < periodEnd).ToList();
-    //                var inBucketSpillage = spillage.Where(x => x.SortDate.HasValue &&
-    //                    x.SortDate.Value.Date >= periodStart &&
-    //                    x.SortDate.Value.Date < periodEnd).ToList();
-
-    //                section.Stats.Add(new SprintProgressDto
-    //                {
-    //                    IterationPath = label,
-    //                    TotalPointsAssigned = inBucketStats.Sum(x => x.TotalPointsAssigned),
-    //                    MidSprintAddedPoints = inBucketStats.Sum(x => x.MidSprintAddedPoints),
-    //                    TotalPointsCompleted = inBucketStats.Sum(x => x.TotalPointsCompleted),
-    //                    SortDate = periodStart
-    //                });
-
-    //                section.Spillage.Add(new SpillageTrendDto
-    //                {
-    //                    IterationPath = label,
-    //                    SpillagePoints = inBucketSpillage.Sum(x => x.SpillagePoints),
-    //                    SortDate = periodStart
-    //                });
-    //            }
-    //            return section;
-    //        }
-
-            // 3. Return the exact structure your frontend expects
-        //    return new SpillageSummaryDto
-        //    {
-        //        All = await GetSectionData("all"),
-        //        Feature = await GetSectionData("Feature"),
-        //        Client = await GetSectionData("Client Issue")
-        //    };
-        //}
 
         private (string unit, int bucketMonths, int defaultN) NormalizePeriodUnit(string? unit)
         {
@@ -406,20 +371,14 @@ namespace SRMDevOps.Repo
             };
         }
 
-        //private DateTime ComputeWindowStart(string unit, int nPeriods)
-        //{
-        //    var now = DateTime.Now;
-        //    var bucketMonths = unit == "quarterly" ? 3 : unit == "yearly" ? 12 : 1;
-        //    return new DateTime(now.Year, now.Month, 1).AddMonths(-((nPeriods * bucketMonths) - 1));
-        //}
-
         private DateTime ComputeWindowStart(string unit, int nPeriods)
         {
-            var now = DateTime.UtcNow; // Use UTC
+            var now = DateTime.Now; // Use Local machine time
             var bucketMonths = unit == "quarterly" ? 3 : unit == "yearly" ? 12 : 1;
-            // Create as UTC
-            return new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc)
-                       .AddMonths(-((nPeriods * bucketMonths) - 1));
+
+            // Create as Local
+            return new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Local)
+                        .AddMonths(-((nPeriods * bucketMonths) - 1));
         }
 
         public async Task<SpillageSummaryDto> GetFullSummaryAsync(List<string> areaPaths, List<SprintDto> adoSprints)
@@ -452,8 +411,6 @@ namespace SRMDevOps.Repo
             var t = timeframe?.ToLower() ?? "";
 
             // 1. Calculate how many sprints we need
-            // Weekly/Bi-weekly sprints require ~2 to 4 sprints per month.
-            // Yearly (n=1) needs ~26 sprints. Yearly (n=2) needs ~52.
             int multiplier = t switch
             {
                 var x when x.Contains("year") => 30,    // ~30 sprints per year
@@ -463,18 +420,16 @@ namespace SRMDevOps.Repo
 
             int fetchCount = n * multiplier;
 
-            // 2. Fetch a larger pool to account for future sprints
+            // 2. Fetch a larger pool
             var allSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount + 10);
 
-            // 3. Filter: Only past and current sprints
+            // 3. Filter using Local Time
             return allSprints
                 .Where(s => s.Attributes.StartDate.HasValue &&
-                            s.Attributes.StartDate.Value.Date <= DateTime.UtcNow.Date)
+                            s.Attributes.StartDate.Value.Date <= DateTime.Now.Date)
                 .OrderByDescending(s => s.Attributes.StartDate)
                 .Take(fetchCount)
                 .ToList();
         }
     }
 }
-
-
