@@ -21,121 +21,168 @@ namespace SRMDevOps.Repo
         }
 
         // Private aggregate holder to return from in-memory mapping
-        private sealed record AggregatedStat(string FullPath, double Total, double AddedLater, double Closed,
+        private sealed record AggregatedStat(string FullPath, double Total, double initialPoints,double AddedLater, double Closed,
                  DateTime? SortDate);
 
         /// <summary>
         /// Internal DB Aggregator: Only returns data for iterations that exist in the DB.
         /// </summary>
+        //    private async Task<List<AggregatedStat>> GetAggregatedStatsAsync(
+        //        List<string> adoAreaPaths,
+        //        Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+        //        string? parentType = null)
+        //    {
+        //        var iterationPaths = sprintDateMap.Keys.ToList();
+
+        //        var validTypes = new[] { "Feature", "Client Issue" };
+
+        //        var query = _context.IvpUserStoryIterations
+        //            .Join(_context.IvpUserStoryDetails,
+        //                usi => usi.UserStoryId,
+        //                usd => usd.UserStoryId,
+        //                (usi, usd) => new { usi, usd })
+        //            .Where(c => iterationPaths.Contains(c.usi.IterationPath) &&
+        //                        adoAreaPaths.Contains(c.usd.AreaPath) &&
+
+        //                        c.usd.ParentType != null);
+
+        //        // 2. If parentType is "all", restrict it to ONLY your two categories
+        //        if (string.IsNullOrEmpty(parentType) || string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
+        //        {
+        //            query = query.Where(c => validTypes.Contains(c.usd.ParentType));
+        //        }
+        //        else
+        //        {
+        //            // 3. Otherwise, filter by the specific type requested (Feature or Client Issue)
+        //            query = query.Where(c => c.usd.ParentType.ToLower() == parentType.ToLower());
+        //        }
+
+        //        // FIX: Include AssignedDate in the select
+        //        var rawData = await query.Select(x => new {
+        //            x.usi.IterationPath,
+        //            x.usi.AssignedDate, // Needed to check if it was added late
+        //            x.usd.StoryPoints,
+        //            x.usd.ClosedDate
+        //        }).ToListAsync();
+
+
+
+        //        return rawData
+        //.GroupBy(x => x.IterationPath)
+        //.Select(g =>
+        //{
+        //    var path = g.Key ?? string.Empty;
+        //    if (!sprintDateMap.TryGetValue(path, out var dates))
+        //        return new AggregatedStat(path, 0, 0, 0, 0, null);
+
+        //    // 1. Get the local Start Date (Day 1)
+        //    var localStart = dates.Start.ToLocalTime();
+        //    var startDay = localStart.Date;
+
+        //    var localEnd = dates.End.ToLocalTime();
+        //    var nextDayThreshold = localEnd.Date.AddDays(1);
+
+        //    // 2. INITIAL POINTS: Only stories assigned EXACTLY on the start date
+        //    var initialPoints = g.Where(x => x.AssignedDate.Date == startDay)
+        //                         .Sum(x => x.StoryPoints ?? 0);
+
+        //    // 3. ADDED LATER: Stories assigned STRICTLY AFTER the start date
+        //    var addedLaterPoints = g.Where(x => x.AssignedDate.Date > startDay)
+        //                            .Sum(x => x.StoryPoints ?? 0);
+
+        //    // 4. TOTAL: Initial + Added Later 
+        //    // Note: This effectively ignores stories assigned BEFORE the start date.
+        //    var totalPoints = initialPoints + addedLaterPoints;
+
+        //    // 5. COMPLETED: Catching everything up to the end of the final day
+        //    var completedPoints = g.Where(x => x.ClosedDate.HasValue &&
+        //                                       x.ClosedDate.Value < nextDayThreshold)
+        //                           .Sum(x => x.StoryPoints ?? 0);
+
+        //    return new AggregatedStat(
+        //        path,
+        //        totalPoints,
+        //        initialPoints,
+        //        addedLaterPoints,
+        //        completedPoints,
+        //        dates.Start
+        //    );
+        //})
+        //.ToList();
+        //    }
+
         private async Task<List<AggregatedStat>> GetAggregatedStatsAsync(
-            List<string> adoAreaPaths,
-            Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
-            string? parentType = null)
+    List<string> adoAreaPaths,
+    Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+    string? parentType = null)
         {
             var iterationPaths = sprintDateMap.Keys.ToList();
-
             var validTypes = new[] { "Feature", "Client Issue" };
 
-            var query = _context.IvpUserStoryIterations
+            // 1. Fetch raw data ordered by Story and Date as requested
+            var rawData = await _context.IvpUserStoryIterations
                 .Join(_context.IvpUserStoryDetails,
                     usi => usi.UserStoryId,
                     usd => usd.UserStoryId,
                     (usi, usd) => new { usi, usd })
                 .Where(c => iterationPaths.Contains(c.usi.IterationPath) &&
                             adoAreaPaths.Contains(c.usd.AreaPath) &&
-                            c.usd.ParentType != null);
-
-            // 2. If parentType is "all", restrict it to ONLY your two categories
-            if (string.IsNullOrEmpty(parentType) || string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
-            {
-                query = query.Where(c => validTypes.Contains(c.usd.ParentType));
-            }
-            else
-            {
-                // 3. Otherwise, filter by the specific type requested (Feature or Client Issue)
-                query = query.Where(c => c.usd.ParentType.ToLower() == parentType.ToLower());
-            }
-
-            // FIX: Include AssignedDate in the select
-            var rawData = await query.Select(x => new {
-                x.usi.IterationPath,
-                x.usi.AssignedDate, // Needed to check if it was added late
-                x.usd.StoryPoints,
-                x.usd.ClosedDate
-            }).ToListAsync();
-
-            //return rawData
-                //.GroupBy(x => x.IterationPath)
-                //.Select(g =>
-                //{
-                //    var path = g.Key ?? string.Empty;
-                //    if (!sprintDateMap.TryGetValue(path, out var dates))
-                //        return new AggregatedStat(path, 0, 0, 0, null);
-
-                //    // 1. FIX: Set the cutoff to the very beginning of the DAY AFTER the sprint ends
-                //    // If Sprint ends March 27, this becomes March 28, 00:00:00
-                //    var startLimit = dates.Start.Date;
-                //    var endLimitThreshold = dates.End.Date.AddDays(1);
-
-                //    // 2. Completed Points: Capture everything up to the last millisecond of the end date
-                //    var completedPoints = g.Where(x => x.ClosedDate.HasValue &&
-                //                                       x.ClosedDate.Value < endLimitThreshold) // < March 28
-                //                           .Sum(x => x.StoryPoints ?? 0);
-
-                //    // 3. Mid-Sprint Added: Capture everything that happened AFTER the start day began
-                //    //var addedLaterPoints = g.Where(x => x.AssignedDate.Date > startLimit)
-                //    //                        .Sum(x => x.StoryPoints ?? 0);
-
-                //    // Capture stories assigned even one second after the sprint start
-                //    var addedLaterPoints = g.Where(x => x.AssignedDate > dates.Start)
-                //                            .Sum(x => x.StoryPoints ?? 0);
-
-                //    var totalPoints = g.Sum(x => x.StoryPoints ?? 0);
-
-                //    return new AggregatedStat(
-                //        path,
-                //        totalPoints,
-                //        addedLaterPoints,
-                //        completedPoints,
-                //        dates.Start
-                //    );
-                //})
-                //.ToList();
-
-            return rawData
-                .GroupBy(x => x.IterationPath)
-                .Select(g =>
-                {
-                    var path = g.Key ?? string.Empty;
-                    if (!sprintDateMap.TryGetValue(path, out var dates))
-                        return new AggregatedStat(path, 0, 0, 0, null);
-
-                    // Using Local Date parts for comparison
-                    var startLimit = dates.Start.Date;
-                    var endLimit = dates.End.Date;
-
-                    // 1. Completed Points: Capture everything closed on or before the end date (Local)
-                    var completedPoints = g.Where(x => x.ClosedDate.HasValue &&
-                                                       x.ClosedDate.Value.Date <= endLimit)
-                                           .Sum(x => x.StoryPoints ?? 0);
-
-                    // 2. Mid-Sprint Added Points (Logic: AssignedDate > Sprint Start Date - Local)
-                    var addedLaterPoints = g.Where(x => x.AssignedDate.Date > startLimit)
-                                            .Sum(x => x.StoryPoints ?? 0);
-
-                    // 3. Initial Points (Logic: Total minus what was added late)
-                    var totalPoints = g.Sum(x => x.StoryPoints ?? 0);
-                    var initialPoints = totalPoints - addedLaterPoints;
-
-                    return new AggregatedStat(
-                        path,
-                        totalPoints, // Total points assigned to the sprint
-                        addedLaterPoints, // Points added after the start date
-                        completedPoints,
-                        dates.Start
-                    );
+                            c.usd.ParentType != null)
+                .Where(c => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
+                            ? validTypes.Contains(c.usd.ParentType)
+                            : c.usd.ParentType.ToLower() == parentType.ToLower())
+                .Select(x => new {
+                    x.usi.UserStoryId,
+                    x.usi.IterationPath,
+                    x.usi.AssignedDate,
+                    x.usd.StoryPoints,
+                    x.usd.ClosedDate
                 })
-                .ToList();
+                .OrderBy(x => x.UserStoryId)
+                .ThenBy(x => x.AssignedDate)
+                .ToListAsync();
+
+            // 2. Process foreach Sprint (S1, S2, S3...)
+            return iterationPaths.Select(path =>
+            {
+                if (!sprintDateMap.TryGetValue(path, out var dates))
+                    return new AggregatedStat(path, 0, 0, 0, 0, null);
+
+                // Normalize boundaries
+                var sStartDay = dates.Start.ToLocalTime().Date; // 12:00 AM Day 1
+                var sEndMax = dates.End.ToLocalTime().Date.AddDays(1).AddTicks(-1); // 11:59:59 PM Last Day
+                var nextDayThreshold = dates.End.ToLocalTime().Date.AddDays(1);
+
+                // 1. THE VALID POOL (The "Yes" Logic)
+                // Rule: iteration must match AND assignment must be on or before the sprint end
+                var validStories = rawData
+                    .Where(us => us.IterationPath.Equals(path, StringComparison.OrdinalIgnoreCase) &&
+                                 us.AssignedDate.ToLocalTime() <= sEndMax)
+                    .ToList();
+
+                // 2. PLANNED (Initial): Only stories assigned ON or BEFORE the start day
+                // This handles your "US.assigned_date <= s1.start" requirement
+                var initial = validStories
+                    .Where(x => x.AssignedDate.ToLocalTime().Date <= sStartDay)
+                    .Sum(x => x.StoryPoints ?? 0);
+
+                // 3. UNPLANNED (Added Later): Assigned strictly AFTER Day 1 began
+                // This handles your "s1.start < US.assigned_date <= s1.end" requirement
+                var added = validStories
+                    .Where(x => x.AssignedDate.ToLocalTime().Date > sStartDay)
+                    .Sum(x => x.StoryPoints ?? 0);
+
+                // 4. TOTAL: Strictly the sum of Planned and Unplanned
+                var total = initial + added;
+
+                // 5. COMPLETED: Only those from the valid pool closed by 11:59 PM on the end date
+                var closed = validStories
+                    .Where(x => x.ClosedDate.HasValue &&
+                                x.ClosedDate.Value.ToLocalTime() < nextDayThreshold)
+                    .Sum(x => x.StoryPoints ?? 0);
+
+                return new AggregatedStat(path, total, initial, added, closed, dates.Start);
+            }).ToList();
         }
 
         public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType = null)
@@ -160,6 +207,7 @@ namespace SRMDevOps.Repo
                     {
                         IterationPath = s.Name,
                         TotalPointsAssigned = dbMatch?.Total ?? 0,
+                        InitialPoints = dbMatch?.initialPoints ?? 0,
                         MidSprintAddedPoints = dbMatch?.AddedLater ?? 0,
                         TotalPointsCompleted = dbMatch?.Closed ?? 0,
                         SortDate = s.Attributes.StartDate
@@ -424,30 +472,54 @@ namespace SRMDevOps.Repo
             };
         }
 
+        //public async Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n)
+        //{
+        //    var t = timeframe?.ToLower() ?? "";
+
+        //    // 1. Calculate how many sprints we need
+        //    int multiplier = t switch
+        //    {
+        //        var x when x.Contains("year") => 30,    // ~30 sprints per year
+        //        var x when x.Contains("quarter") => 8,  // ~8 sprints per quarter
+        //        _ => 3                                  // ~3 sprints per month
+        //    };
+
+        //    int fetchCount = n * multiplier;
+
+        //    // 2. Fetch a larger pool
+        //    var allSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount + 10);
+
+        //    // 3. Filter using Local Time
+        //    return allSprints
+        //        .Where(s => s.Attributes.StartDate.HasValue &&
+        //                    s.Attributes.StartDate.Value.Date <= DateTime.Now.Date)
+        //        .OrderByDescending(s => s.Attributes.StartDate)
+        //        .Take(fetchCount)
+        //        .ToList();
+        //}
         public async Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n)
         {
             var t = timeframe?.ToLower() ?? "";
 
-            // 1. Calculate how many sprints we need
+            // 1. Calculate Multiplier
             int multiplier = t switch
             {
-                var x when x.Contains("year") => 30,    // ~30 sprints per year
-                var x when x.Contains("quarter") => 8,  // ~8 sprints per quarter
-                _ => 3                                  // ~3 sprints per month
+                var x when x.Contains("year") => 30,
+                var x when x.Contains("quarter") => 8,
+                _ => 4// Monthly needs ~3, Sprint-wise needs enough to cover the 'n'
             };
 
-            int fetchCount = n * multiplier;
+            // 2. Fetch a large enough raw pool (n * multiplier + buffer)
+            int fetchCount = (n * multiplier) + 10;
+            var allSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount);
 
-            // 2. Fetch a larger pool
-            var allSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount + 10);
-
-            // 3. Filter using Local Time
+            // 3. Filter for Started Sprints only
+            // This removes the "30 Mar - 17 Apr" sprint from the top
             return allSprints
                 .Where(s => s.Attributes.StartDate.HasValue &&
-                            s.Attributes.StartDate.Value.Date <= DateTime.Now.Date)
+                            s.Attributes.StartDate.Value.ToLocalTime() <= DateTime.Now)
                 .OrderByDescending(s => s.Attributes.StartDate)
-                .Take(fetchCount)
-                .ToList();
+                .ToList(); // Return the whole valid list; let the Controller 'Take(n)'
         }
     }
 

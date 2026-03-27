@@ -32,22 +32,53 @@ namespace SRMDevOps.Controllers
             _devops = devops;
         }
 
+        //[HttpGet]
+        //public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
+        //{
+        //    var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
+
+        //    // Get only the sprints that have actually started
+        //    var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
+
+        //    if (string.IsNullOrEmpty(timeframe))
+        //    {
+        //        // Sprint-wise view (take exactly 'n')
+        //        var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
+        //        return Ok(results);
+        //    }
+        //    if (string.IsNullOrEmpty(timeframe))
+        //    {
+        //        // Don't just take the top 6; ensure we are taking the 6 most recent 
+        //        // that actually have data or are currently active.
+        //        var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
+        //        return Ok(results);
+        //    }
+
+        //    // Monthly/Quarterly view
+        //    var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints);
+        //    return Ok(result ?? new SpillageSummaryDto());
+        //}
+
         [HttpGet]
         public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
         {
             var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
 
-            // Get only the sprints that have actually started
+            // 1. Fetch a larger pool regardless of timeframe (e.g., n + 10)
+            // This gives us "room" to filter out future sprints without losing December.
             var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
 
             if (string.IsNullOrEmpty(timeframe))
             {
-                // Sprint-wise view (take exactly 'n')
-                var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
+                // 2. Take the top 'n' from the VALID (past/current) list.
+                // This ensures if n=6, you get 6 sprints that have actually started.
+                var sprintwiseList = validSprints.Take(n).ToList();
+
+                var results = await _spillage.GetFullSummaryAsync(areaPaths, sprintwiseList);
                 return Ok(results);
             }
 
-            // Monthly/Quarterly view
+            // Monthly/Quarterly logic
             var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints);
             return Ok(result ?? new SpillageSummaryDto());
         }
