@@ -154,80 +154,50 @@ namespace SRMDevOps.Repo
 
             foreach (var storyGroup in groupedByStory)
             {
-                // Order the story's history by date once for efficiency
                 var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
 
                 foreach (var sprintPath in iterationPaths)
                 {
                     var dates = sprintDateMap[sprintPath];
-                    var sStart = dates.Start.ToLocalTime();
-                    var sEnd = dates.End.ToLocalTime().Date.AddDays(1).AddTicks(-1);
-                    var nextDayThreshold = dates.End.ToLocalTime().Date.AddDays(1);
+                    var sStart = dates.Start.ToLocalTime().Date;
+                    var sPlanningGraceEnd = sStart.AddDays(1).AddTicks(-1);
 
-                    // --- THE UPDATED "YES/NO" LOGIC ---
+                    // BOUNDARY FIX: Add a 2-day grace period to the end date for 'Completed' logic
+                    var sEndMax = dates.End.ToLocalTime().Date.AddDays(1).AddTicks(-1);
+                    var sCompletionGraceEnd = dates.End.ToLocalTime().Date.AddDays(2).AddTicks(-1);
 
-                    // 1. Find the specific record where this story was assigned to THIS sprint
-                    var assignmentToThisSprint = storyHistory.FirstOrDefault(us =>
-                        us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase));
+                    var latestInSprintWindow = storyHistory
+                        .Where(us => us.AssignedDate.ToLocalTime() <= sEndMax)
+                        .OrderByDescending(us => us.AssignedDate)
+                        .FirstOrDefault();
 
-                    if (assignmentToThisSprint == null) continue; // No record for this sprint, "No"
+                    if (latestInSprintWindow == null) continue;
 
-                    var assignedTime = assignmentToThisSprint.AssignedDate.ToLocalTime();
-                    bool isYes = false;
-                    bool isInitial = false;
+                    bool isYes = latestInSprintWindow.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase);
+                    if (!isYes) continue;
 
-                    // CASE A: UNPLANNED (Mid-Sprint)
-                    // s1.start < US.assigned_date <= s1.end and s1.iteration = S1
-                    if (assignedTime > sStart && assignedTime <= sEnd)
+                    var firstAssignedToThisSprint = storyHistory
+                        .FirstOrDefault(us => us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase));
+
+                    bool isInitial = firstAssignedToThisSprint != null &&
+                                     firstAssignedToThisSprint.AssignedDate.ToLocalTime() <= sPlanningGraceEnd;
+
+                    // --- UPDATED COMPLETION LOGIC ---
+                    var points = latestInSprintWindow.StoryPoints ?? 0;
+                    var current = sprintAggregates[sprintPath];
+
+                    // If it was closed within the grace period, count it as completed
+                    bool isClosed = latestInSprintWindow.ClosedDate.HasValue &&
+                                    latestInSprintWindow.ClosedDate.Value.ToLocalTime() <= sCompletionGraceEnd;
+
+                    sprintAggregates[sprintPath] = new
                     {
-                        isYes = true;
-                        isInitial = false;
-                    }
-                    // CASE B: PLANNED (Pre-Sprint)
-                    // US.assigned_date <= s1.start and iteration = S1
-                    else if (assignedTime <= sStart)
-                    {
-                        // NEW CHECK: Did someone move it to a different sprint BEFORE S1 started?
-                        // Find if there is ANY record assigned AFTER this one but still BEFORE or ON S1.Start
-                        var reassignedBeforeStart = storyHistory.Any(us =>
-                            us.AssignedDate.ToLocalTime() > assignedTime &&
-                            us.AssignedDate.ToLocalTime() <= sStart &&
-                            !us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase));
-
-                        if (!reassignedBeforeStart)
-                        {
-                            isYes = true;
-                            isInitial = true;
-                        }
-                        // else: isYes remains false (This handles your u1 example where it moved to s3)
-                    }
-
-                    if (isYes)
-                    {
-                        var points = assignmentToThisSprint.StoryPoints ?? 0;
-                        var current = sprintAggregates[sprintPath];
-
-                        double newInitial = current.Initial + (isInitial ? points : 0);
-                        double newAdded = current.Added + (!isInitial ? points : 0);
-                        double newClosed = current.Closed;
-
-                        // COMPLETED: Only if it was closed by the end of this sprint
-                        if (assignmentToThisSprint.ClosedDate.HasValue &&
-                            assignmentToThisSprint.ClosedDate.Value.ToLocalTime() < nextDayThreshold)
-                        {
-                            newClosed += points;
-                        }
-
-                        sprintAggregates[sprintPath] = new
-                        {
-                            Initial = newInitial,
-                            Added = newAdded,
-                            Closed = newClosed
-                        };
-                    }
+                        Initial = current.Initial + (isInitial ? points : 0),
+                        Added = current.Added + (!isInitial ? points : 0),
+                        Closed = current.Closed + (isClosed ? points : 0)
+                    };
                 }
             }
-
             // 5. Final Mapping to the AggregatedStat list
             return iterationPaths.Select(path =>
             {
