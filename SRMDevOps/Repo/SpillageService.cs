@@ -119,8 +119,7 @@ namespace SRMDevOps.Repo
             var iterationPaths = sprintDateMap.Keys.ToList();
             var validTypes = new[] { "Feature", "Client Issue" };
 
-            // 1. Fetch all records for the User Stories that appear in these iterations
-            // Ordering by Story ID and Date as requested for the outer loop
+            // 1. Fetch all records
             var allData = await _context.IvpUserStoryIterations
                 .Join(_context.IvpUserStoryDetails,
                     usi => usi.UserStoryId,
@@ -132,7 +131,8 @@ namespace SRMDevOps.Repo
                 .Where(c => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
                             ? validTypes.Contains(c.usd.ParentType)
                             : c.usd.ParentType.ToLower() == parentType.ToLower())
-                .Select(x => new {
+                .Select(x => new
+                {
                     x.usi.UserStoryId,
                     x.usi.IterationPath,
                     x.usi.AssignedDate,
@@ -143,52 +143,67 @@ namespace SRMDevOps.Repo
                 .ThenBy(x => x.AssignedDate)
                 .ToListAsync();
 
-            // Dictionary to hold our final sprint aggregates
             var sprintAggregates = iterationPaths.ToDictionary(
                 path => path,
                 path => new { Initial = 0.0, Added = 0.0, Closed = 0.0 }
             );
 
-            // 2. OUTER LOOP: Group by User Story
+            // 2. Group by User Story
             var groupedByStory = allData.GroupBy(x => x.UserStoryId);
 
             foreach (var storyGroup in groupedByStory)
             {
                 var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
+                int storyId = storyGroup.Key;
 
                 foreach (var sprintPath in iterationPaths)
                 {
                     var dates = sprintDateMap[sprintPath];
                     var sStart = dates.Start.ToLocalTime().Date;
                     var sPlanningGraceEnd = sStart.AddDays(1).AddTicks(-1);
-
-                    // BOUNDARY FIX: Add a 2-day grace period to the end date for 'Completed' logic
                     var sEndMax = dates.End.ToLocalTime().Date.AddDays(1).AddTicks(-1);
-                    var sCompletionGraceEnd = dates.End.ToLocalTime().Date.AddDays(2).AddTicks(-1);
 
-                    var latestInSprintWindow = storyHistory
+                    // 1. Get state at the end of the Planning Window (Day 1)
+                    var stateAtPlanningEnd = storyHistory
+                        .Where(us => us.AssignedDate.ToLocalTime() <= sPlanningGraceEnd)
+                        .OrderByDescending(us => us.AssignedDate)
+                        .FirstOrDefault();
+
+                    // 2. Check for Mid-Sprint Additions
+                    bool addedMidSprint = storyHistory.Any(us =>
+                        us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase) &&
+                        us.AssignedDate.ToLocalTime() > sPlanningGraceEnd &&
+                        us.AssignedDate.ToLocalTime() <= sEndMax);
+
+                    // Decision Logic
+                    bool isInitial = stateAtPlanningEnd != null &&
+                                     stateAtPlanningEnd.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase);
+
+                    bool isYes = isInitial || addedMidSprint;
+
+                    if (!isYes) continue;
+
+                    // --- CONSOLE LOGGING START ---
+                    if (isInitial && sprintPath.Equals("IVP-SRM\\SPRINT 15 Dec - 02 Jan 2026"))
+                    {
+                        // This will list every ID contributing to your 278 Initial Points
+                        Console.WriteLine($"Sprint: {sprintPath} | Planned Story ID: {storyId}");
+                    }
+                    // --- CONSOLE LOGGING END ---
+
+                    // 3. Completion Check (Strict)
+                    var latestInWindow = storyHistory
                         .Where(us => us.AssignedDate.ToLocalTime() <= sEndMax)
                         .OrderByDescending(us => us.AssignedDate)
                         .FirstOrDefault();
 
-                    if (latestInSprintWindow == null) continue;
+                    bool isClosed = latestInWindow != null &&
+                                    latestInWindow.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase) &&
+                                    latestInWindow.ClosedDate.HasValue &&
+                                    latestInWindow.ClosedDate.Value.ToLocalTime() <= sEndMax;
 
-                    bool isYes = latestInSprintWindow.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase);
-                    if (!isYes) continue;
-
-                    var firstAssignedToThisSprint = storyHistory
-                        .FirstOrDefault(us => us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase));
-
-                    bool isInitial = firstAssignedToThisSprint != null &&
-                                     firstAssignedToThisSprint.AssignedDate.ToLocalTime() <= sPlanningGraceEnd;
-
-                    // --- UPDATED COMPLETION LOGIC ---
-                    var points = latestInSprintWindow.StoryPoints ?? 0;
+                    var points = latestInWindow?.StoryPoints ?? 0;
                     var current = sprintAggregates[sprintPath];
-
-                    // If it was closed within the grace period, count it as completed
-                    bool isClosed = latestInSprintWindow.ClosedDate.HasValue &&
-                                    latestInSprintWindow.ClosedDate.Value.ToLocalTime() <= sCompletionGraceEnd;
 
                     sprintAggregates[sprintPath] = new
                     {
@@ -198,7 +213,8 @@ namespace SRMDevOps.Repo
                     };
                 }
             }
-            // 5. Final Mapping to the AggregatedStat list
+
+            // 5. Final Mapping
             return iterationPaths.Select(path =>
             {
                 var data = sprintAggregates[path];
@@ -212,6 +228,109 @@ namespace SRMDevOps.Repo
                 );
             }).ToList();
         }
+
+        //    private async Task<List<AggregatedStat>> GetAggregatedStatsAsync(
+        //List<string> adoAreaPaths,
+        //Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+        //string? parentType = null)
+        //    {
+        //        var iterationPaths = sprintDateMap.Keys.ToList();
+
+        //        // 1. IGNORE DB - Create only your test cases
+        //        string s1Path = @"IVP-SRM\SPRINT 05 Jan - 23 Jan 2026";
+        //        string s2Path = @"IVP-SRM\SPRINT 26 Jan - 13 Feb 2026";
+        //        string backlogPath = @"IVP-SRM";
+
+        //        var allData = new List<StoryUpdateRow>();
+
+        //        // CASE 1: U1 ends up in S1 (Planned)
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9991, IterationPath = s1Path, AssignedDate = new DateTime(2026, 1, 2), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9991, IterationPath = backlogPath, AssignedDate = new DateTime(2026, 1, 3), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9991, IterationPath = s1Path, AssignedDate = new DateTime(2026, 1, 4), StoryPoints = 5, ClosedDate = null });
+
+        //        // CASE 2: U1 ends up in Backlog (Should be ignored for S1)
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9992, IterationPath = s1Path, AssignedDate = new DateTime(2026, 1, 2), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9992, IterationPath = backlogPath, AssignedDate = new DateTime(2026, 1, 3), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9992, IterationPath = s1Path, AssignedDate = new DateTime(2026, 1, 4, 10, 0, 0), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9992, IterationPath = s2Path, AssignedDate = new DateTime(2026, 1, 4, 15, 0, 0), StoryPoints = 5, ClosedDate = null });
+        //        allData.Add(new StoryUpdateRow { UserStoryId = 9992, IterationPath = backlogPath, AssignedDate = new DateTime(2026, 1, 15), StoryPoints = 5, ClosedDate = null });
+
+        //        // 2. Group the manual data
+        //        var groupedByStory = allData.GroupBy(x => x.UserStoryId);
+
+        //        var sprintAggregates = iterationPaths.ToDictionary(
+        //            path => path,
+        //            path => new { Initial = 0.0, Added = 0.0, Closed = 0.0 }
+        //        );
+
+        //        foreach (var storyGroup in groupedByStory)
+        //        {
+        //            var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
+
+        //            foreach (var sprintPath in iterationPaths)
+        //            {
+        //                var dates = sprintDateMap[sprintPath];
+        //                var sStart = dates.Start.ToLocalTime().Date;
+        //                var sPlanningGraceEnd = sStart.AddDays(1).AddTicks(-1);
+
+        //                // BOUNDARY: Define the exact end of the sprint (No grace period added)
+        //                var sEndMax = dates.End.ToLocalTime().Date.AddDays(1).AddTicks(-1);
+
+        //                var latestInSprintWindow = storyHistory
+        //                    .Where(us => us.AssignedDate.ToLocalTime() <= sEndMax)
+        //                    .OrderByDescending(us => us.AssignedDate)
+        //                    .FirstOrDefault();
+
+        //                if (latestInSprintWindow == null) continue;
+
+        //                bool isYes = latestInSprintWindow.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase);
+        //                if (!isYes) {
+        //                    Console.WriteLine($"[REJECTED] ID: {storyGroup.Key} is NOT in {sprintPath} (Last known path: {latestInSprintWindow.IterationPath})");
+        //                    continue;
+        //                }
+
+
+        //                var firstAssignedToThisSprint = storyHistory
+        //                    .FirstOrDefault(us => us.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase));
+
+        //                bool isInitial = firstAssignedToThisSprint != null &&
+        //                                 firstAssignedToThisSprint.AssignedDate.ToLocalTime() <= sPlanningGraceEnd;
+
+        //                if (isInitial)
+        //                    Console.WriteLine($"[PLANNED] ID: {storyGroup.Key} in {sprintPath}");
+        //                else
+        //                    Console.WriteLine($"[ADDED] ID: {storyGroup.Key} in {sprintPath}");
+
+        //                var points = latestInSprintWindow.StoryPoints ?? 0;
+        //                var current = sprintAggregates[sprintPath];
+
+        //                // STRICT COMPLETION: Check only against the end of the sprint
+        //                bool isClosed = latestInSprintWindow.ClosedDate.HasValue &&
+        //                                latestInSprintWindow.ClosedDate.Value.ToLocalTime() <= sEndMax;
+
+        //                sprintAggregates[sprintPath] = new
+        //                {
+        //                    Initial = current.Initial + (isInitial ? points : 0),
+        //                    Added = current.Added + (!isInitial ? points : 0),
+        //                    Closed = current.Closed + (isClosed ? points : 0)
+        //                };
+        //            }
+        //        }
+
+        //        // 5. Final Mapping
+        //        return iterationPaths.Select(path =>
+        //        {
+        //            var data = sprintAggregates[path];
+        //            return new AggregatedStat(
+        //                path,
+        //                data.Initial + data.Added,
+        //                data.Initial,
+        //                data.Added,
+        //                data.Closed,
+        //                sprintDateMap[path].Start
+        //            );
+        //        }).ToList();
+        //    }
         public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType = null)
         {
             try
@@ -558,5 +677,14 @@ namespace SRMDevOps.Repo
         public int MaxSpillageHops { get; set; }
         public string ParentStatus { get; set; }
         public DateTime? LatestAssignedDate { get; set; }
+    }
+
+    public class StoryUpdateRow
+    {
+        public int UserStoryId { get; set; }
+        public string IterationPath { get; set; }
+        public DateTime AssignedDate { get; set; }
+        public double? StoryPoints { get; set; }
+        public DateTime? ClosedDate { get; set; }
     }
 }
