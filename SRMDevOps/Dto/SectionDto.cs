@@ -10,5 +10,6 @@ namespace SRMDevOps.Dto
 
         // New: per-story history relevant to this section (empty when not requested)
         public List<ParentImpactDto> History { get; init; } = new();
+        public List<SprintDailyTrendDto> DailyTrends { get; init; } = new();
     }
 }

@@ -410,7 +410,7 @@ namespace SRMDevOps.Repo
                     return new SpillageTrendDto
                     {
                         IterationPath = s.Name,
-                        SpillagePoints = (dbMatch?.Total ?? 0) - (dbMatch?.ClosedTimely ?? 0),
+                        SpillagePoints = (dbMatch?.Total ?? 0) - (dbMatch?.TotalClosed ?? 0),
                         SortDate = s.Attributes.StartDate
                     };
                 })
@@ -506,6 +506,91 @@ namespace SRMDevOps.Repo
                 return new List<ParentImpactDto>();
             }
         }
+        private async Task<List<SprintDailyTrendDto>> GetDailyTrendStatsAsync(
+    List<string> adoAreaPaths,
+    Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+    string? parentType = null)
+        {
+            var iterationPaths = sprintDateMap.Keys.ToList();
+            var validTypes = new[] { "Feature", "Client Issue" };
+
+            // --- LINE MATCH: Exact data fetch from GetAggregatedStatsAsync ---
+            var allData = await _context.IvpUserStoryIterations
+                .Join(_context.IvpUserStoryDetails,
+                    usi => usi.UserStoryId,
+                    usd => usd.UserStoryId,
+                    (usi, usd) => new { usi, usd })
+                .Where(c => iterationPaths.Contains(c.usi.IterationPath) &&
+                            adoAreaPaths.Contains(c.usd.AreaPath))
+                .Where(c => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
+                            ? (c.usd.ParentType != null && validTypes.Contains(c.usd.ParentType))
+                            : (c.usd.ParentType != null && c.usd.ParentType.ToLower() == parentType.ToLower()))
+                .Select(x => new
+                {
+                    x.usi.UserStoryId,
+                    x.usi.IterationPath,
+                    x.usi.AssignedDate,
+                    x.usd.StoryPoints,
+                    x.usd.ClosedDate
+                })
+                .OrderBy(x => x.UserStoryId)
+                .ThenBy(x => x.AssignedDate)
+                .ToListAsync();
+
+            // Grouping to replicate the Membership Check
+            var groupedByStory = allData.GroupBy(x => x.UserStoryId).ToList();
+            var trends = new List<SprintDailyTrendDto>();
+
+            foreach (var sprintPath in iterationPaths)
+            {
+                var dates = sprintDateMap[sprintPath];
+                var sStart = dates.Start.ToLocalTime().Date; // 12:00 AM Cutoff
+                var sEnd = dates.End.ToLocalTime().Date;
+
+                var trend = new SprintDailyTrendDto { IterationPath = sprintPath };
+
+                // We loop from sStart to sEnd to create the daily points
+                for (var day = sStart; day <= sEnd; day = day.AddDays(1))
+                {
+                    // Snapshot timing: 
+                    // For the first day, we want to show the 'Initial' state as defined in your stats
+                    // For subsequent days, we show the state at the end of that day.
+                    var snapshotTime = (day == sStart)
+                        ? sStart
+                        : day.AddDays(1).AddTicks(-1);
+
+                    double dailyTotal = 0;
+
+                    foreach (var storyGroup in groupedByStory)
+                    {
+                        var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
+
+                        // --- LINE MATCH: stateAtPlanningEnd Logic ---
+                        // This determines if the story belongs to this sprint at this point in time
+                        var currentSnapshot = storyHistory
+                            .Where(us => us.AssignedDate.ToLocalTime() <= snapshotTime)
+                            .OrderByDescending(us => us.AssignedDate)
+                            .FirstOrDefault();
+
+                        if (currentSnapshot != null &&
+                            currentSnapshot.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase))
+                        {
+                            dailyTotal += (currentSnapshot.StoryPoints ?? 0.0);
+                        }
+                    }
+
+                    trend.DayByDayPoints.Add(new DailyPointDto
+                    {
+                        Date = day,
+                        TotalPoints = dailyTotal
+                    });
+                }
+                trends.Add(trend);
+            }
+
+            return trends;
+        }
+
         // for monthly/quarterly timeframe
         public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
     string? timeframe,
@@ -699,25 +784,33 @@ namespace SRMDevOps.Repo
 
         public async Task<SpillageSummaryDto> GetFullSummaryAsync(List<string> areaPaths, List<SprintDto> adoSprints)
         {
+            var dateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => (s.Attributes.StartDate.Value, s.Attributes.FinishDate.Value),
+                StringComparer.OrdinalIgnoreCase);
+
             return new SpillageSummaryDto
             {
                 All = new SectionDto
                 {
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "all"),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "all"),
-                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "all")
+                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "all"),
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "all") // New addition
                 },
                 Feature = new SectionDto
                 {
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "Feature"),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "Feature"),
-                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Feature")
+                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Feature"),
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Feature") // New addition
                 },
                 Client = new SectionDto
                 {
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "Client Issue"),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "Client Issue"),
-                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Client Issue")
+                    History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Client Issue"),
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Client Issue") // New addition
                 }
             };
         }
@@ -790,5 +883,17 @@ namespace SRMDevOps.Repo
         public DateTime AssignedDate { get; set; }
         public double? StoryPoints { get; set; }
         public DateTime? ClosedDate { get; set; }
+    }
+
+    public class SprintDailyTrendDto
+    {
+        public string IterationPath { get; set; }
+        public List<DailyPointDto> DayByDayPoints { get; set; } = new();
+    }
+
+    public class DailyPointDto
+    {
+        public DateTime Date { get; set; }
+        public double TotalPoints { get; set; }
     }
 }
