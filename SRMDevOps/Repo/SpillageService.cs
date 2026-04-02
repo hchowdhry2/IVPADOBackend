@@ -528,9 +528,9 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
             }
         }
         public async Task<List<ParentImpactDto>> GetImpactedParentHistoryAsync(
-            List<string> adoAreaPaths,
-            List<SprintDto> adoSprints,
-            string? parentType = null)
+    List<string> adoAreaPaths,
+    List<SprintDto> adoSprints,
+    string? parentType = null)
         {
             try
             {
@@ -538,139 +538,117 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
 
                 var sprintPaths = adoSprints.Select(s => s.Path).ToList();
 
-                // 1. Join Iterations and Details to find spilled stories
-                var rowsQuery = _context.IvpUserStoryIterations
+                // 1. Get stories and their details within the SPECIFIC sprint window
+                var storiesInSprints = await _context.IvpUserStoryIterations
                     .Join(_context.IvpUserStoryDetails,
                         usi => usi.UserStoryId,
                         usd => usd.UserStoryId,
                         (usi, usd) => new { usi, usd })
                     .Where(x => adoAreaPaths.Contains(x.usd.AreaPath) &&
                                 sprintPaths.Contains(x.usi.IterationPath) &&
-                                x.usd.ParentId != null); // Ensure there is a parent ID to group by
-
-                // Filter by Parent Type (e.g., "Feature" or "Client Issue")
-                if (!string.IsNullOrEmpty(parentType) && !string.Equals(parentType, "all", StringComparison.OrdinalIgnoreCase))
-                    rowsQuery = rowsQuery.Where(x => x.usd.ParentType == parentType);
-
-                var rows = await rowsQuery
+                                x.usd.ParentId != null)
+                    .Where(x => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
+                        ? true
+                        : x.usd.ParentType.ToLower() == parentType.ToLower())
                     .Select(x => new {
                         x.usd.UserStoryId,
                         x.usd.ParentId,
                         x.usd.State,
-                        x.usi.AssignedDate,
-                        x.usd.StoryPoints
+                        x.usi.IterationPath,
+                        x.usi.AssignedDate
                     })
                     .ToListAsync();
 
-                if (!rows.Any()) return new List<ParentImpactDto>();
+                if (!storiesInSprints.Any()) return new List<ParentImpactDto>();
 
-                // 2. Calculate "Spillage Hops" for each unique story
-                var storyIds = rows.Select(r => r.UserStoryId).Distinct().ToList();
-                var spillageCounts = await _context.IvpUserStoryIterations
-                    .Where(i => storyIds.Contains(i.UserStoryId))
-                    .GroupBy(i => i.UserStoryId)
-                    .Select(g => new { UserStoryId = g.Key, Total = g.Count() })
-                    .ToDictionaryAsync(x => x.UserStoryId, x => x.Total);
+                // 2. Calculate transitions ONLY within the provided adoSprints (Day 0 Logic)
+                var transitionMap = storiesInSprints
+                    .GroupBy(h => h.UserStoryId)
+                    .ToDictionary(
+                        g => g.Key,
+                        g => {
+                            // Sort by date to establish the "Day 0" baseline
+                            var list = g.OrderBy(x => x.AssignedDate).ToList();
+                            int transitions = 0;
 
-                // 3. Group by ParentId to show impacted details per Feature/Client Issue
-                // 3. Group by ParentId with fixed aggregation logic
-                var result = rows
-                    .GroupBy(r => r.ParentId)
+                            // We start from the second appearance (i=1)
+                            // The first appearance (i=0) is our "Fresh Start" baseline
+                            for (int i = 1; i < list.Count; i++)
+                            {
+                                if (!list[i].IterationPath.Equals(list[i - 1].IterationPath, StringComparison.OrdinalIgnoreCase))
+                                {
+                                    transitions++;
+                                }
+                            }
+                            return transitions;
+                        });
+
+                // 3. Final aggregation by ParentId
+                return storiesInSprints
+                    .GroupBy(s => s.ParentId)
                     .Select(g => {
-                        // Fix 1: Get unique stories to sum points correctly
-                        var uniqueStories = g.GroupBy(s => s.UserStoryId)
-                                             .Select(group => group.First())
-                                             .ToList();
+                        var uniqueStoryIds = g.Select(x => x.UserStoryId).Distinct().ToList();
 
-                        // Fix 2: Determine parent status by "most advanced" child state
-                        var states = g.Select(x => x.State).ToList();
-                        string calculatedStatus = states.Contains("In Progress") ? "In Progress" :
-                                                  states.Contains("New") && states.Contains("Closed") ? "In Progress" :
-                                                  states.OrderByDescending(s => s == "Closed").First();
+                        int totalImpactScore = uniqueStoryIds.Sum(id => transitionMap.GetValueOrDefault(id, 0));
 
                         return new ParentImpactDto
                         {
                             ParentId = g.Key,
-                            ImpactedStoriesCount = uniqueStories.Count,
-                            // Sum points only once per story ID
-                            TotalPointsImpacted = uniqueStories.Sum(x => x.StoryPoints ?? 0),
-                            MaxSpillageHops = g.Max(x => spillageCounts.ContainsKey(x.UserStoryId) ? spillageCounts[x.UserStoryId] : 0),
-                            ParentStatus = calculatedStatus,
-                            LatestAssignedDate = g.Max(x => x.AssignedDate)
+                            ParentStatus = g.Any(s => s.State == "In Progress") ? "In Progress" : g.First().State,
+                            TotalStoryCount = uniqueStoryIds.Count,
+                            TotalImpactScore = totalImpactScore
                         };
                     })
-                    .OrderByDescending(r => r.LatestAssignedDate)
+                    .OrderByDescending(r => r.TotalImpactScore)
                     .ToList();
-
-                return result;
             }
             catch (Exception e)
             {
-                Console.WriteLine($"Parent Impact Error: {e.Message}");
+                Console.WriteLine($"Simplified Impact Error: {e.Message}");
                 return new List<ParentImpactDto>();
             }
         }
         private async Task<List<SprintDailyTrendDto>> GetDailyTrendStatsAsync(
-            List<string> adoAreaPaths,
-            Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
-            string? parentType = null)
+    List<string> adoAreaPaths,
+    Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+    string? parentType = null,
+    bool isTask = false) // Added parameter
         {
             var iterationPaths = sprintDateMap.Keys.ToList();
             var validTypes = new[] { "Feature", "Client Issue" };
 
-            // --- LINE MATCH: Exact data fetch from GetAggregatedStatsAsync ---
-            var allData = await _context.IvpUserStoryIterations
-                .Join(_context.IvpUserStoryDetails,
-                    usi => usi.UserStoryId,
-                    usd => usd.UserStoryId,
-                    (usi, usd) => new { usi, usd })
-                .Where(c => iterationPaths.Contains(c.usi.IterationPath) &&
-                            adoAreaPaths.Contains(c.usd.AreaPath))
-                .Where(c => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
-                            ? (c.usd.ParentType != null && validTypes.Contains(c.usd.ParentType))
-                            : (c.usd.ParentType != null && c.usd.ParentType.ToLower() == parentType.ToLower()))
-                .Select(x => new
-                {
-                    x.usi.UserStoryId,
-                    x.usi.IterationPath,
-                    x.usi.AssignedDate,
-                    x.usd.StoryPoints,
-                    x.usd.ClosedDate
-                })
-                .OrderBy(x => x.UserStoryId)
-                .ThenBy(x => x.AssignedDate)
-                .ToListAsync();
+            // 1. Fetch data using the appropriate Task/Story logic
+            var rawData = isTask
+                ? await GetTaskDataAsync(iterationPaths, adoAreaPaths)
+                : await GetUserStoryDataAsync(iterationPaths, adoAreaPaths);
 
-            // Grouping to replicate the Membership Check
-            var groupedByStory = allData.GroupBy(x => x.UserStoryId).ToList();
+            // 2. Filter by ParentType
+            var allData = rawData
+                .Where(c => (string.IsNullOrEmpty(parentType) || parentType.ToLower() == "all")
+                            ? (c.ParentType != null && validTypes.Contains(c.ParentType))
+                            : (c.ParentType != null && c.ParentType.ToLower() == parentType.ToLower()))
+                .ToList();
+
+            var groupedByStory = allData.GroupBy(x => x.Id).ToList();
             var trends = new List<SprintDailyTrendDto>();
 
             foreach (var sprintPath in iterationPaths)
             {
                 var dates = sprintDateMap[sprintPath];
-                var sStart = dates.Start.ToLocalTime().Date; // 12:00 AM Cutoff
+                var sStart = dates.Start.ToLocalTime().Date;
                 var sEnd = dates.End.ToLocalTime().Date;
 
                 var trend = new SprintDailyTrendDto { IterationPath = sprintPath };
 
-                // We loop from sStart to sEnd to create the daily points
                 for (var day = sStart; day <= sEnd; day = day.AddDays(1))
                 {
-                    // Snapshot timing: 
-                    // For the first day, we want to show the 'Initial' state as defined in your stats
-                    // For subsequent days, we show the state at the end of that day.
-                    var snapshotTime = (day == sStart)
-                        ? sStart
-                        : day.AddDays(1).AddTicks(-1);
-
+                    var snapshotTime = (day == sStart) ? sStart : day.AddDays(1).AddTicks(-1);
                     double dailyTotal = 0;
 
                     foreach (var storyGroup in groupedByStory)
                     {
                         var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
 
-                        // --- LINE MATCH: stateAtPlanningEnd Logic ---
-                        // This determines if the story belongs to this sprint at this point in time
                         var currentSnapshot = storyHistory
                             .Where(us => us.AssignedDate.ToLocalTime() <= snapshotTime)
                             .OrderByDescending(us => us.AssignedDate)
@@ -679,19 +657,15 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
                         if (currentSnapshot != null &&
                             currentSnapshot.IterationPath.Equals(sprintPath, StringComparison.OrdinalIgnoreCase))
                         {
-                            dailyTotal += (currentSnapshot.StoryPoints ?? 0.0);
+                            // FIX: Use .Value (Points for Stories, 1.0 for Tasks)
+                            dailyTotal += currentSnapshot.Value;
                         }
                     }
 
-                    trend.DayByDayPoints.Add(new DailyPointDto
-                    {
-                        Date = day,
-                        TotalPoints = dailyTotal
-                    });
+                    trend.DayByDayPoints.Add(new DailyPointDto { Date = day, TotalPoints = dailyTotal });
                 }
                 trends.Add(trend);
             }
-
             return trends;
         }
 
@@ -817,21 +791,24 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "all", isTask),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "all", isTask),
                     History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "all"),
-                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "all") // New addition
+                    // FIX: Pass isTask here
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "all", isTask)
                 },
                 Feature = new SectionDto
                 {
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "Feature", isTask),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "Feature", isTask),
                     History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Feature"),
-                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Feature") // New addition
+                    // FIX: Pass isTask here
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Feature", isTask)
                 },
                 Client = new SectionDto
                 {
                     Stats = await GetSprintStatsAsync(areaPaths, adoSprints, "Client Issue", isTask),
                     Spillage = await GetSpillageTrendAsync(areaPaths, adoSprints, "Client Issue", isTask),
                     History = await GetImpactedParentHistoryAsync(areaPaths, adoSprints, "Client Issue"),
-                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Client Issue") // New addition
+                    // FIX: Pass isTask here
+                    DailyTrends = await GetDailyTrendStatsAsync(areaPaths, dateMap, "Client Issue", isTask)
                 }
             };
         }
@@ -900,11 +877,9 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
     public class ParentImpactDto
     {
         public int? ParentId { get; set; }
-        public int ImpactedStoriesCount { get; set; }
-        public double TotalPointsImpacted { get; set; }
-        public int MaxSpillageHops { get; set; }
         public string ParentStatus { get; set; }
-        public DateTime? LatestAssignedDate { get; set; }
+        public int TotalStoryCount { get; set; } // Total unique stories under this feature
+        public int TotalImpactScore { get; set; } // Sum of all child story transitions
     }
 
     public class StoryUpdateRow
