@@ -15,6 +15,7 @@ builder.Services.AddControllers()
 builder.Services.AddDbContext<IvpadodashboardContext>();
 builder.Services.AddTransient<ISpillage, SpillageService>();
 builder.Services.AddTransient<IADO, DevopsService>();
+builder.Services.AddScoped<ITask, TaskService>();
 
 builder.Services.AddCors(options =>
     options.AddPolicy(

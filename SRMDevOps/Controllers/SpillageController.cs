@@ -25,42 +25,16 @@ namespace SRMDevOps.Controllers
     {
         private readonly ISpillage _spillage;
         private readonly IADO _devops;
+        private readonly ITask _taskService;
 
-        public SpillageController(ISpillage spillage, IConfiguration configuration, IADO devops)
+        public SpillageController(ISpillage spillage, IConfiguration configuration, IADO devops, ITask taskService)
         {
             _spillage = spillage;
             _devops = devops;
+            _taskService = taskService;
         }
-
-        //[HttpGet]
-        //public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
-        //{
-        //    var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
-
-        //    // Get only the sprints that have actually started
-        //    var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
-
-        //    if (string.IsNullOrEmpty(timeframe))
-        //    {
-        //        // Sprint-wise view (take exactly 'n')
-        //        var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
-        //        return Ok(results);
-        //    }
-        //    if (string.IsNullOrEmpty(timeframe))
-        //    {
-        //        // Don't just take the top 6; ensure we are taking the 6 most recent 
-        //        // that actually have data or are currently active.
-        //        var results = await _spillage.GetFullSummaryAsync(areaPaths, validSprints.Take(n).ToList());
-        //        return Ok(results);
-        //    }
-
-        //    // Monthly/Quarterly view
-        //    var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints);
-        //    return Ok(result ?? new SpillageSummaryDto());
-        //}
-
         [HttpGet]
-        public async Task<IActionResult> GetStats(string projectId, string teamId, string? timeframe, int n = 6)
+        public async Task<IActionResult> GetStats([FromQuery]string projectId, [FromQuery] string teamId, [FromQuery] string? timeframe, [FromQuery] int n = 6, [FromQuery] string workType = "story")
         {
             var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
 
@@ -68,20 +42,36 @@ namespace SRMDevOps.Controllers
             // This gives us "room" to filter out future sprints without losing December.
             var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
 
+            bool isTask = workType.Equals("task", StringComparison.OrdinalIgnoreCase);
+
             if (string.IsNullOrEmpty(timeframe))
             {
                 // 2. Take the top 'n' from the VALID (past/current) list.
                 // This ensures if n=6, you get 6 sprints that have actually started.
                 var sprintwiseList = validSprints.Take(n).ToList();
 
-                var results = await _spillage.GetFullSummaryAsync(areaPaths, sprintwiseList);
+                var results = await _spillage.GetFullSummaryAsync(areaPaths, sprintwiseList, isTask);
                 return Ok(results);
             }
 
             // Monthly/Quarterly logic
-            var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints);
+            var result = await _spillage.GetAggregatedTeamStatsAsync(timeframe, n, areaPaths, validSprints, isTask);
             return Ok(result ?? new SpillageSummaryDto());
         }
+
+        //[HttpGet("tasks")]
+        //public async Task<IActionResult> GetTaskStats(string projectId, string teamId, string? timeframe, int n = 6)
+        //{
+        //    // 1. Reuse existing logic to get Area Paths and Sprints
+        //    var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
+        //    var validSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
+
+        //    // 2. Call the Task Service
+        //    // This will return the "Counts" of tasks instead of "Sum of points"
+        //    var result = await _taskService.GetTaskAggregatedTimeframeStatsAsync(timeframe, n, areaPaths, validSprints);
+
+        //    return Ok(result ?? new SpillageSummaryDto());
+        //}
     }
 }
 
