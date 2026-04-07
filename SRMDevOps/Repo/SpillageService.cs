@@ -769,41 +769,59 @@ public async Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoA
             };
         }
 
+        //private DateTime ComputeWindowStart(string unit, int nPeriods)
+        //{
+        //    var now = DateTime.Now; // Use Local machine time
+
+        //    if (unit == "yearly")
+        //    {
+        //        // Start at Jan 1 of (currentYear - nPeriods + 1).
+        //        // Example: now=2026, nPeriods=1 => start=2026-01-01 (bucket = 2026)
+        //        //          now=2026, nPeriods=2 => start=2025-01-01 (buckets 2025 and 2026)
+        //        var startYear = now.Year - (nPeriods - 1);
+        //        return new DateTime(startYear, 1, 1, 0, 0, 0, DateTimeKind.Local);
+        //    }
+        //    var bucketMonths = unit == "quarterly" ? 3 : 1;
+
+        //    // Create as Local
+        //    return new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Local)
+        //                .AddMonths(-((nPeriods * bucketMonths) - 1));
+        //}
+
         private DateTime ComputeWindowStart(string unit, int nPeriods)
         {
-            var now = DateTime.Now; // Use Local machine time
+            var now = DateTime.Now; // Local time
 
             if (unit == "yearly")
             {
-                // Start at Jan 1 of (currentYear - nPeriods + 1).
-                // Example: now=2026, nPeriods=1 => start=2026-01-01 (bucket = 2026)
-                //          now=2026, nPeriods=2 => start=2025-01-01 (buckets 2025 and 2026)
+                // Calendar-year buckets: start at Jan 1 of (currentYear - nPeriods + 1)
                 var startYear = now.Year - (nPeriods - 1);
                 return new DateTime(startYear, 1, 1, 0, 0, 0, DateTimeKind.Local);
             }
-            var bucketMonths = unit == "quarterly" ? 3 : 1;
 
-            // Create as Local
+            if (unit == "quarterly")
+            {
+                // Compute calendar quarter (1..4) for current date
+                var currentQuarter = ((now.Month - 1) / 3) + 1;
+                // Start quarter index for the window
+                var startQuarter = currentQuarter - (nPeriods - 1);
+                var startYear = now.Year;
+
+                // If startQuarter <= 0, roll back years
+                while (startQuarter <= 0)
+                {
+                    startQuarter += 4;
+                    startYear -= 1;
+                }
+
+                var startMonth = (startQuarter - 1) * 3 + 1; // 1,4,7,10
+                return new DateTime(startYear, startMonth, 1, 0, 0, 0, DateTimeKind.Local);
+            }
+
+            // Monthly (default) - keep rolling-month behaviour anchored at current month
+            var bucketMonths = 1;
             return new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Local)
                         .AddMonths(-((nPeriods * bucketMonths) - 1));
-
-            //var now = DateTime.Now; // Local time
-            ////var bucketMonths = unit == "quarterly" ? 3 : unit == "yearly" ? 12 : 1;
-
-            //// Calendar-year buckets for "yearly"
-            //if (unit == "yearly")
-            //{
-            //    // Start at Jan 1 of (currentYear - nPeriods + 1).
-            //    // Example: now=2026, nPeriods=1 => start=2026-01-01 (bucket = 2026)
-            //    //          now=2026, nPeriods=2 => start=2025-01-01 (buckets 2025 and 2026)
-            //    var startYear = now.Year - (nPeriods - 1);
-            //    return new DateTime(startYear, 1, 1, 0, 0, 0, DateTimeKind.Local);
-            //}
-
-            //var bucketMonths = unit == "quarterly" ? 3 : 1;
-            //// Monthly/quarterly: keep existing rolling-month behaviour (start on first of current month and go back)
-            //return new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Local)
-            //    .AddMonths(-((nPeriods * bucketMonths) - 1));
         }
 
         public async Task<SpillageSummaryDto> GetFullSummaryAsync(List<string> areaPaths, List<SprintDto> adoSprints, string projectId, bool isTask = false)
