@@ -7,8 +7,8 @@ namespace SRMDevOps.Repo
     public interface ISpillage
     {
 
-        Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType, bool isTask = false);
-        Task<List<SpillageTrendDto>> GetSpillageTrendAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType, bool isTask = false);
+        //Task<List<SprintProgressDto>> GetSprintStatsAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType, bool isTask = false);
+        //Task<List<SpillageTrendDto>> GetSpillageTrendAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string? parentType, bool isTask = false);
         Task<SpillageSummaryDto> GetFullSummaryAsync(List<string> adoAreaPaths, List<SprintDto> adoSprints, string projectId, bool isTask = false);
 
         Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(string? timeframe,int n,List<string> adoAreaPaths, List<SprintDto> adoSprints, string projectId, bool isTask = false);
