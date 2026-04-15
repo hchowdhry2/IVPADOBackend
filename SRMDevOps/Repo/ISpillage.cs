@@ -15,6 +15,8 @@ namespace SRMDevOps.Repo
 
         Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n);
 
+        Task<List<DeveloperSprintStatDto>> GetDeveloperPerformanceReportAsync(List<string> areaPaths, List<SprintDto> adoSprints);
+
         //// Aggregated business methods (summary) — unchanged for last-N
         //Task<SpillageSummaryDto> GetSpillageSummaryLast(string projectName, int lastNSprints);
 

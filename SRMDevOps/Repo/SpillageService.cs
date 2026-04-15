@@ -34,13 +34,16 @@ namespace SRMDevOps.Repo
         private class UnifiedWorkItem
         {
             public int Id { get; set; }
-            public int? ParentId { get; set; } // For Tasks, to link back to Story's Parent
+            public int? ParentId { get; set; }
             public string IterationPath { get; set; }
             public DateTime AssignedDate { get; set; }
-            public double Value { get; set; } // StoryPoints for Stories, 1.0 for Tasks
+            public double Value { get; set; }
             public DateTime? ClosedDate { get; set; }
-            public string? ParentType { get; set; } // Now included in both
-            public string? State { get; set; } // Added to help determine Parent Status in impact analysis-
+            public string? ParentType { get; set; }
+            public string? State { get; set; } // Added to help determine Parent Status in impact analysis
+
+            public string? AssignedTo { get; set; }
+            public decimal? DevEffort { get; set; }
 
         }
 
@@ -56,6 +59,8 @@ namespace SRMDevOps.Repo
                     ParentId = x.usd.ParentId, // Capture ParentId for later use in Task mapping
                     IterationPath = x.usi.IterationPath,
                     AssignedDate = x.usi.AssignedDate,
+                    AssignedTo = null, // Stories don't use this for the dev report
+                    DevEffort = 0,
                     Value = x.usd.StoryPoints ?? 0.0,
                     ClosedDate = x.usd.ClosedDate,
                     ParentType = x.usd.ParentType,
@@ -71,6 +76,8 @@ namespace SRMDevOps.Repo
             return await _context.IvpTaskIterations
                 .Join(_context.IvpTaskDetails, ti => ti.TaskId, td => td.TaskId, (ti, td) => new { ti, td })
                 .Join(_context.IvpUserStoryDetails, c => c.td.UserStoryId, usd => usd.UserStoryId, (c, usd) => new { c.ti, c.td, usd })
+                // for developer level stats
+                .Join(_context.IvpTaskAssignees, x => x.ti.TaskId, ta => ta.TaskId, (x, ta) => new { x.ti, x.td, x.usd, ta })
                 .Where(x => iterationPaths.Contains(x.ti.IterationPath) && adoAreaPaths.Contains(x.usd.AreaPath))
                 .Select(x => new UnifiedWorkItem
                 {
@@ -78,6 +85,8 @@ namespace SRMDevOps.Repo
                     ParentId = x.td.UserStoryId, // Link Task back to its User Story's ParentId
                     IterationPath = x.ti.IterationPath,
                     AssignedDate = x.ti.AssignedDate,
+                    AssignedTo = x.ta.AssignedTo,    // Now this will work!
+                    DevEffort = x.td.DevEffort,
                     Value = 1.0, // COUNTING logic
                     ClosedDate = x.td.ClosedDate,
                     ParentType = x.usd.ParentType, // Pulling ParentType from Story table
@@ -98,10 +107,10 @@ namespace SRMDevOps.Repo
         //bool isTask = false)
 
         private List<AggregatedStat> GetAggregatedStatsFromMemory(
-List<UnifiedWorkItem> allData,
-List<string> iterationPaths,
-Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
-string? parentType = null)
+            List<UnifiedWorkItem> allData,
+            List<string> iterationPaths,
+            Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap,
+            string? parentType = null)
         {
             var validTypes = new[] { "Feature", "Client Issue" };
 
@@ -117,7 +126,7 @@ string? parentType = null)
                 path => new { Initial = 0.0, Added = 0.0, CompletedTimely = 0.0, CompletedLate = 0.0 }
             );
 
-            // --- KEEP YOUR EXISTING LOGIC BELOW ---
+            //main logic
             foreach (var storyGroup in filteredData.GroupBy(x => x.Id))
             {
                 var storyHistory = storyGroup.OrderBy(x => x.AssignedDate).ToList();
@@ -586,6 +595,30 @@ string? parentType = null)
                                     s.SortDate.Value.ToLocalTime().Date >= periodStart &&
                                     s.SortDate.Value.ToLocalTime().Date < periodEnd)
                         .ToList();
+                    var devStatsInThisPeriod = rawSection.DeveloperStats
+             .Where(ds => {
+                 // Find the sprint to get its actual start date for correct bucketing
+                 var sprint = adoSprints.FirstOrDefault(s =>
+                     s.Path.Equals(ds.Sprint, StringComparison.OrdinalIgnoreCase));
+
+                 var sprintStart = sprint?.Attributes?.StartDate?.ToLocalTime().Date;
+                 return sprintStart.HasValue &&
+                        sprintStart >= periodStart &&
+                        sprintStart < periodEnd;
+             })
+             .GroupBy(ds => ds.Developer) // Group by Dev Name to combine their work in multiple sprints
+             .Select(g => new DeveloperSprintStatDto
+             {
+                 Sprint = label, // Assign the period label (e.g., "Jan 2026")
+                 Developer = g.Key,
+                 TotalTasksAssigned = g.Sum(x => x.TotalTasksAssigned),
+                 TotalTasksCompleted = g.Sum(x => x.TotalTasksCompleted),
+                 TotalHours = g.Sum(x => x.TotalHours)
+             })
+             .ToList();
+
+
+                    groupedSection.DeveloperStats.AddRange(devStatsInThisPeriod);
 
                     // Sum up the data for all sprints that started in this month
                     groupedSection.Stats.Add(new SprintProgressDto
@@ -762,8 +795,69 @@ string? parentType = null)
                 Stats = GetSprintStatsFromMemory(sectionSegment, adoSprints, dateMap, parentType),
                 Spillage = GetSpillageTrendFromMemory(sectionSegment, adoSprints, parentType),
                 History = GetImpactedParentHistoryFromMemory(sectionSegment, titleMap),
-                DailyTrends = GetDailyTrendStatsFromMemory(sectionSegment, dateMap, isTask)
+                DailyTrends = GetDailyTrendStatsFromMemory(sectionSegment, dateMap, isTask),
+                DeveloperStats = isTask
+                    ? GetDeveloperStatsInternal(sectionSegment, adoSprints)
+                    : new List<DeveloperSprintStatDto>()
             };
+        }
+
+        private List<DeveloperSprintStatDto> GetDeveloperStatsInternal(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
+        {
+            var sprintDateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => new { Start = s.Attributes.StartDate, End = s.Attributes.FinishDate },
+                StringComparer.OrdinalIgnoreCase);
+
+            // Identify the "True Owner" per task per sprint
+            var validOwners = sectionData
+                .GroupBy(t => new { t.Id, t.IterationPath })
+                .Select(group =>
+                {
+                    var history = group.OrderBy(h => h.AssignedDate).ToList();
+                    var dates = sprintDateMap.GetValueOrDefault(group.Key.IterationPath);
+                    UnifiedWorkItem lastQualified = null;
+
+                    for (int i = history.Count - 1; i >= 0; i--)
+                    {
+                        var current = history[i];
+                        DateTime nextDate = (i + 1 < history.Count)
+                            ? history[i + 1].AssignedDate
+                            : (current.ClosedDate ?? dates?.End ?? DateTime.Now);
+
+                        if ((nextDate - current.AssignedDate).TotalHours >= 24)
+                        {
+                            lastQualified = current;
+                            break;
+                        }
+                    }
+                    return lastQualified;
+                })
+                .Where(v => v != null)
+                .ToList();
+
+            // Final Aggregation and Sort (Most recent sprint first)
+            return validOwners
+                .GroupBy(v => new { v.IterationPath, v.AssignedTo })
+                .Select(g => {
+                    var sprintStart = sprintDateMap.GetValueOrDefault(g.Key.IterationPath)?.Start;
+                    return new
+                    {
+                        Dto = new DeveloperSprintStatDto
+                        {
+                            Sprint = g.Key.IterationPath,
+                            Developer = g.Key.AssignedTo ?? "Unassigned",
+                            TotalTasksAssigned = g.Count(),
+                            TotalTasksCompleted = g.Count(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase)),
+                            TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m)
+                        },
+                        SortDate = sprintStart
+                    };
+                })
+                .OrderByDescending(r => r.SortDate)
+                .ThenByDescending(r => r.Dto.TotalTasksCompleted)
+                .Select(r => r.Dto)
+                .ToList();
         }
 
         public async Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n)
@@ -790,6 +884,104 @@ string? parentType = null)
                 .OrderByDescending(s => s.Attributes.StartDate)
                 .ToList(); // Return the whole valid list; let the Controller 'Take(n)'
         }
+
+        public async Task<List<DeveloperSprintStatDto>> GetDeveloperPerformanceReportAsync(List<string> areaPaths, List<SprintDto> adoSprints)
+        {
+            var iterationPaths = adoSprints.Select(s => s.Path).ToList();
+
+            // 1. Create a map for dates to handle strict sprint boundaries and sorting
+            var sprintDateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => new {
+                    Start = s.Attributes.StartDate,
+                    End = s.Attributes.FinishDate
+                },
+                StringComparer.OrdinalIgnoreCase);
+
+            // 2. Fetch Raw Data (SQL JOIN equivalent)
+            var rawData = await (from itr in _context.IvpTaskIterations
+                                 join asgn in _context.IvpTaskAssignees on itr.TaskId equals asgn.TaskId
+                                 join det in _context.IvpTaskDetails on itr.TaskId equals det.TaskId
+                                 join usd in _context.IvpUserStoryDetails on det.UserStoryId equals usd.UserStoryId
+                                 where iterationPaths.Contains(itr.IterationPath)
+                                       && areaPaths.Contains(usd.AreaPath)
+                                 select new UnifiedWorkItem
+                                 {
+                                     Id = itr.TaskId,
+                                     IterationPath = itr.IterationPath,
+                                     AssignedTo = asgn.AssignedTo,
+                                     AssignedDate = asgn.AssignedDate,
+                                     ClosedDate = det.ClosedDate,
+                                     State = det.State,
+                                     DevEffort = det.DevEffort
+                                 })
+                                 .OrderBy(x => x.Id)
+                                 .ThenBy(x => x.AssignedDate)
+                                 .ToListAsync();
+
+            // 3. Apply 24-hour and Backwards Search logic
+            var validOwners = rawData
+                .GroupBy(t => new { t.Id, t.IterationPath })
+                .Select(group =>
+                {
+                    var history = group.ToList();
+                    var sprintPath = group.Key.IterationPath;
+                    var dates = sprintDateMap.GetValueOrDefault(sprintPath);
+
+                    UnifiedWorkItem lastQualified = null;
+
+                    // Loop BACKWARDS (Matches ROW_NUMBER OVER ... ORDER BY assigned_date DESC)
+                    for (int i = history.Count - 1; i >= 0; i--)
+                    {
+                        var current = history[i];
+
+                        // Determine duration: next person's start date, or task close, or sprint end
+                        DateTime nextDate = (i + 1 < history.Count)
+                            ? history[i + 1].AssignedDate
+                            : (current.ClosedDate ?? dates?.End ?? DateTime.Now);
+
+                        double hoursHeld = (nextDate - current.AssignedDate).TotalHours;
+
+                        if (hoursHeld >= 24)
+                        {
+                            lastQualified = current;
+                            break;
+                        }
+                    }
+                    return lastQualified;
+                })
+                .Where(v => v != null)
+                .ToList();
+
+            // 4. Final Aggregation and Sorting
+            return validOwners
+                .GroupBy(v => new { v.IterationPath, v.AssignedTo })
+                .Select(g => {
+                    // Get the StartDate for this sprint to use for chronological sorting
+                    var sprintStart = sprintDateMap.GetValueOrDefault(g.Key.IterationPath)?.Start;
+
+                    return new
+                    {
+                        Dto = new DeveloperSprintStatDto
+                        {
+                            Sprint = g.Key.IterationPath,
+                            Developer = g.Key.AssignedTo ?? "Unassigned",
+                            TotalTasksAssigned = g.Count(),
+                            TotalTasksCompleted = g.Count(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase)),
+                            TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m)
+                        },
+                        SortDate = sprintStart
+                    };
+                })
+                // Matches main dashboard: Most recent sprint at the top
+                .OrderByDescending(r => r.SortDate)
+                // Then sort by developers who completed the most work
+                .ThenByDescending(r => r.Dto.TotalTasksCompleted)
+                .Select(r => r.Dto)
+                .ToList();
+        }
+
+        
     }
 
     //for task/user story
