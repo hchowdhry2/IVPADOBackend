@@ -59,6 +59,28 @@ namespace SRMDevOps.Controllers
             return Ok(result ?? new SpillageSummaryDto());
         }
 
+        [HttpGet("developer-performance")]
+        public async Task<IActionResult> GetDevPerformance(
+            [FromQuery] string projectId,
+            [FromQuery] string teamId,
+            [FromQuery] string? timeframe,
+            [FromQuery] int n = 6)
+        {
+            // 1. Fetch the area paths
+            var areaPaths = await _devops.GetTeamAreaPathsAsync(projectId, teamId);
+
+            // 2. Fetch the large pool of sprints
+            var allSprints = await _spillage.GetSprintsForTimeframeAsync(projectId, teamId, timeframe, n);
+
+            // 3. CRITICAL: Limit the list to exactly 'n' sprints here
+            var sprintwiseList = allSprints.OrderByDescending(s => s.Attributes.StartDate).Take(n).ToList();
+
+            // 4. Generate the report ONLY for these n sprints
+            var report = await _spillage.GetDeveloperPerformanceReportAsync(areaPaths, sprintwiseList);
+
+            return Ok(report);
+        }
+
         //[HttpGet("tasks")]
         //public async Task<IActionResult> GetTaskStats(string projectId, string teamId, string? timeframe, int n = 6)
         //{
