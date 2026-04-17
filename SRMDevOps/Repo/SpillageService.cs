@@ -885,20 +885,23 @@ namespace SRMDevOps.Repo
                 .ToList(); // Return the whole valid list; let the Controller 'Take(n)'
         }
 
-        public async Task<List<DeveloperSprintStatDto>> GetDeveloperPerformanceReportAsync(List<string> areaPaths, List<SprintDto> adoSprints)
+        public async Task<List<DeveloperSprintStatDto>> GetDeveloperPerformanceReportAsync(
+    List<string> areaPaths,
+    List<SprintDto> adoSprints)
         {
             var iterationPaths = adoSprints.Select(s => s.Path).ToList();
 
-            // 1. Create a map for dates to handle strict sprint boundaries and sorting
+            // 1. Map sprint boundaries
             var sprintDateMap = adoSprints.ToDictionary(
                 s => s.Path,
-                s => new {
-                    Start = s.Attributes.StartDate,
-                    End = s.Attributes.FinishDate
+                s => new
+                {
+                    Start = s.Attributes.StartDate ?? DateTime.MinValue,
+                    End = s.Attributes.FinishDate ?? DateTime.Now
                 },
                 StringComparer.OrdinalIgnoreCase);
 
-            // 2. Fetch Raw Data (SQL JOIN equivalent)
+            // 2. Fetch raw data (FULL assignment history, not grouped by sprint)
             var rawData = await (from itr in _context.IvpTaskIterations
                                  join asgn in _context.IvpTaskAssignees on itr.TaskId equals asgn.TaskId
                                  join det in _context.IvpTaskDetails on itr.TaskId equals det.TaskId
@@ -908,80 +911,101 @@ namespace SRMDevOps.Repo
                                  select new UnifiedWorkItem
                                  {
                                      Id = itr.TaskId,
-                                     IterationPath = itr.IterationPath,
+                                     IterationPath = itr.IterationPath, // original (not used for grouping)
                                      AssignedTo = asgn.AssignedTo,
                                      AssignedDate = asgn.AssignedDate,
-                                     ClosedDate = det.ClosedDate,
                                      State = det.State,
                                      DevEffort = det.DevEffort
                                  })
-                                 .OrderBy(x => x.Id)
-                                 .ThenBy(x => x.AssignedDate)
-                                 .ToListAsync();
+                                .OrderBy(x => x.Id)
+                                .ThenBy(x => x.AssignedDate)
+                                .ToListAsync();
 
-            // 3. Apply 24-hour and Backwards Search logic
-            var validOwners = rawData
-                .GroupBy(t => new { t.Id, t.IterationPath })
-                .Select(group =>
+            // 3. Group by TASK (IMPORTANT: not by sprint)
+            var tasksGrouped = rawData
+                .GroupBy(t => t.Id)
+                .ToList();
+
+            var validOwners = new List<UnifiedWorkItem>();
+
+            // 4. Evaluate EACH task across EACH sprint
+            foreach (var taskGroup in tasksGrouped)
+            {
+                var history = taskGroup.OrderBy(x => x.AssignedDate).ToList();
+
+                foreach (var sprint in adoSprints)
                 {
-                    var history = group.ToList();
-                    var sprintPath = group.Key.IterationPath;
-                    var dates = sprintDateMap.GetValueOrDefault(sprintPath);
+                    var sprintPath = sprint.Path;
 
-                    UnifiedWorkItem lastQualified = null;
+                    if (!sprintDateMap.TryGetValue(sprintPath, out var sprintDates))
+                        continue;
 
-                    // Loop BACKWARDS (Matches ROW_NUMBER OVER ... ORDER BY assigned_date DESC)
+                    DateTime sprintStart = sprintDates.Start;
+                    DateTime sprintEnd = sprintDates.End;
+
+                    // Traverse backwards (latest assignment first)
                     for (int i = history.Count - 1; i >= 0; i--)
                     {
                         var current = history[i];
 
-                        // Determine duration: next person's start date, or task close, or sprint end
                         DateTime nextDate = (i + 1 < history.Count)
                             ? history[i + 1].AssignedDate
-                            : (current.ClosedDate ?? dates?.End ?? DateTime.Now);
+                            : DateTime.Now;
 
-                        double hoursHeld = (nextDate - current.AssignedDate).TotalHours;
+                        // Calculate overlap WITHIN sprint
+                        DateTime effectiveStart = current.AssignedDate > sprintStart
+                            ? current.AssignedDate
+                            : sprintStart;
+
+                        DateTime effectiveEnd = nextDate < sprintEnd
+                            ? nextDate
+                            : sprintEnd;
+
+                        var hoursHeld = (effectiveEnd - effectiveStart).TotalHours;
 
                         if (hoursHeld >= 24)
                         {
-                            lastQualified = current;
-                            break;
+                            validOwners.Add(new UnifiedWorkItem
+                            {
+                                Id = current.Id,
+                                IterationPath = sprintPath, // assign THIS sprint
+                                AssignedTo = current.AssignedTo,
+                                State = current.State,
+                                DevEffort = current.DevEffort
+                            });
+
+                            break; // stop after finding last valid owner
                         }
                     }
-                    return lastQualified;
-                })
-                .Where(v => v != null)
-                .ToList();
+                }
+            }
 
-            // 4. Final Aggregation and Sorting
-            return validOwners
+            // 5. Final aggregation
+            var result = validOwners
                 .GroupBy(v => new { v.IterationPath, v.AssignedTo })
-                .Select(g => {
-                    // Get the StartDate for this sprint to use for chronological sorting
-                    var sprintStart = sprintDateMap.GetValueOrDefault(g.Key.IterationPath)?.Start;
+                .Select(g =>
+                {
+                    var sprintDates = sprintDateMap[g.Key.IterationPath];
 
-                    return new
+                    return new DeveloperSprintStatDto
                     {
-                        Dto = new DeveloperSprintStatDto
-                        {
-                            Sprint = g.Key.IterationPath,
-                            Developer = g.Key.AssignedTo ?? "Unassigned",
-                            TotalTasksAssigned = g.Count(),
-                            TotalTasksCompleted = g.Count(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase)),
-                            TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m)
-                        },
-                        SortDate = sprintStart
+                        Sprint = g.Key.IterationPath,
+                        Developer = g.Key.AssignedTo ?? "Unassigned",
+                        TotalTasksAssigned = g.Count(),
+                        TotalTasksCompleted = g.Count(x =>
+                            x.State != null &&
+                            x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase)),
+                        TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m),
+                        SprintStartDate = sprintDates.Start
                     };
                 })
-                // Matches main dashboard: Most recent sprint at the top
-                .OrderByDescending(r => r.SortDate)
-                // Then sort by developers who completed the most work
-                .ThenByDescending(r => r.Dto.TotalTasksCompleted)
-                .Select(r => r.Dto)
+                .OrderBy(x => x.SprintStartDate)
+                .ThenByDescending(x => x.TotalTasksCompleted)
                 .ToList();
+
+            return result;
         }
 
-        
     }
 
     //for task/user story
