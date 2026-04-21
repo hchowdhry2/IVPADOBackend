@@ -637,12 +637,12 @@ namespace SRMDevOps.Repo
                         };
                     }
                         // 4. Return the final summary grouped by Start Date
-                            return new SpillageSummaryDto
-                            {
-                                All = AggregateByStartTime(rawSummary.All),
-                                Feature = AggregateByStartTime(rawSummary.Feature),
-                                Client = AggregateByStartTime(rawSummary.Client)
-                            };
+                        return new SpillageSummaryDto
+                        {
+                            All = AggregateByStartTime(rawSummary.All),
+                            Feature = AggregateByStartTime(rawSummary.Feature),
+                            Client = AggregateByStartTime(rawSummary.Client)
+                        };
         }
         
 
