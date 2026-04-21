@@ -45,6 +45,7 @@ namespace SRMDevOps.Repo
             public string? AssignedTo { get; set; }
             public decimal? DevEffort { get; set; }
             public decimal? InitialEffort { get; set; }
+            public string Activity { get; set; }
 
         }
 
@@ -92,7 +93,8 @@ namespace SRMDevOps.Repo
                     ClosedDate = x.td.ClosedDate,
                     ParentType = x.usd.ParentType, // Pulling ParentType from Story table
                     State = x.td.State, // Capture Task state for impact analysis
-                    InitialEffort = x.td.IntialEffort
+                    InitialEffort = x.td.IntialEffort,
+                    Activity = x.td.Activity
                 })
                 .OrderBy(x => x.Id).ThenBy(x => x.AssignedDate)
                 .ToListAsync();
@@ -634,8 +636,36 @@ namespace SRMDevOps.Repo
                         })
                         .OrderBy(x => x.SortDate)
                         .ToList(),
-                        };
-                    }
+
+                    // Inside AggregateByStartTime mapping
+                    DeveloperActivityStats = rawSection.DeveloperActivityStats
+                    .SelectMany(s => s.Activities.Select(a => new {
+                        // Use the properties directly instead of Splitting a string
+                        Dev = s.Developer,
+                        Period = GetLabel(adoSprints.First(sp => sp.Path.Equals(s.PeriodLabel)).Attributes.StartDate.Value),
+                        Data = a
+                    }))
+                    .GroupBy(x => new { x.Dev, x.Period, x.Data.ActivityType })
+                    .Select(g => new { g.Key.Dev, g.Key.Period, g.Key.ActivityType, Total = g.Sum(x => x.Data.Total), Completed = g.Sum(x => x.Data.Completed) })
+                    .GroupBy(x => new { x.Dev, x.Period })
+                    .Select(periodGroup => new DeveloperSprintActivityDto
+                    {
+                        // Map them to the two separate properties defined in your DTO
+                        Developer = periodGroup.Key.Dev,
+                        PeriodLabel = periodGroup.Key.Period, // This will now hold "Q1 2026" or "MMM yyyy"
+                        Activities = periodGroup.Select(x => new ActivityDetailDto
+                        {
+                            ActivityType = x.ActivityType,
+                            Total = x.Total,
+                            Completed = x.Completed
+                        }).ToList()
+                    }).ToList(),
+
+                };
+
+               
+                
+            }
                         // 4. Return the final summary grouped by Start Date
                             return new SpillageSummaryDto
                             {
@@ -784,6 +814,8 @@ namespace SRMDevOps.Repo
                 Spillage = GetSpillageTrendFromMemory(sectionSegment, adoSprints, parentType),
                 History = GetImpactedParentHistoryFromMemory(sectionSegment, titleMap),
                 DailyTrends = GetDailyTrendStatsFromMemory(sectionSegment, dateMap, isTask),
+
+                DeveloperActivityStats = isTask ? GetDeveloperActivityStats(sectionSegment, adoSprints) : new List<DeveloperSprintActivityDto>(),
                 DeveloperStats = isTask
                     ? GetDeveloperStatsInternal(sectionSegment, adoSprints)
                     : new List<DeveloperSprintStatDto>(),
@@ -1033,6 +1065,30 @@ namespace SRMDevOps.Repo
                 .ToList();
         }
 
+        private List<DeveloperSprintActivityDto> GetDeveloperActivityStats(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
+        {
+            // Reuses your existing "True Owner" logic
+            var validAssignments = GetQualifiedTaskAssignments(sectionData, adoSprints);
+
+            return validAssignments
+                .Where(x => !string.IsNullOrEmpty(x.Activity) && !string.IsNullOrEmpty(x.AssignedTo))
+                .GroupBy(x => new { x.AssignedTo, x.IterationPath })
+                .Select(group => new DeveloperSprintActivityDto
+                {
+                    Developer = group.Key.AssignedTo,
+                    PeriodLabel = group.Key.IterationPath,
+                    Activities = group
+                        .GroupBy(a => a.Activity)
+                        .Select(actGroup => new ActivityDetailDto
+                        {
+                            ActivityType = actGroup.Key,
+                            Total = actGroup.Count(),
+                            Completed = actGroup.Count(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+                        }).ToList()
+                })
+                .ToList();
+        }
+
     }
 
     //for task/user story
@@ -1074,5 +1130,19 @@ namespace SRMDevOps.Repo
     {
         public DateTime Date { get; set; }
         public double TotalPoints { get; set; }
+    }
+
+    public class DeveloperSprintActivityDto
+    {
+        public string PeriodLabel { get; set; } // "sprint 05 jan - 23 jan 2026"
+        public string Developer { get; set; }
+        public List<ActivityDetailDto> Activities { get; set; } = new();
+    }
+
+    public class ActivityDetailDto
+    {
+        public string ActivityType { get; set; } // "Dev", "PR", "Testing"
+        public int Total { get; set; }
+        public int Completed { get; set; }
     }
 }
