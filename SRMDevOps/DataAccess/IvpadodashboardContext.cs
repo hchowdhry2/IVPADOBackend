@@ -55,6 +55,9 @@ public partial class IvpadodashboardContext : DbContext
                 .HasNoKey()
                 .ToTable("ivp_task_details");
 
+            entity.Property(e => e.Activity)
+                .HasMaxLength(50)
+                .HasColumnName("activity");
             entity.Property(e => e.ClosedDate).HasColumnName("closed_date");
             entity.Property(e => e.CreationDate).HasColumnName("creation_date");
             entity.Property(e => e.DevEffort)

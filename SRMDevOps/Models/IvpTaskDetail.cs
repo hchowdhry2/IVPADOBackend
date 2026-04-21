@@ -22,4 +22,6 @@ public partial class IvpTaskDetail
     public decimal? DevEffort { get; set; }
 
     public decimal? IntialEffort { get; set; }
+
+    public string? Activity { get; set; }
 }
