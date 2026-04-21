@@ -13,5 +13,7 @@ namespace SRMDevOps.Dto
         public List<SprintDailyTrendDto> DailyTrends { get; init; } = new();
 
         public List<DeveloperSprintStatDto> DeveloperStats { get; set; } = new();
+
+        public List<EffortVarianceDto> EffortVariance { get; set; } = new();
     }
 }

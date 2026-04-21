@@ -61,6 +61,9 @@ public partial class IvpadodashboardContext : DbContext
                 .HasColumnType("decimal(18, 5)")
                 .HasColumnName("dev_effort");
             entity.Property(e => e.FirstInprogressTime).HasColumnName("first_inprogress_time");
+            entity.Property(e => e.IntialEffort)
+                .HasColumnType("decimal(18, 5)")
+                .HasColumnName("intial_effort");
             entity.Property(e => e.State)
                 .HasMaxLength(50)
                 .HasColumnName("state");

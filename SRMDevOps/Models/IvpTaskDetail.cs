@@ -20,4 +20,6 @@ public partial class IvpTaskDetail
     public string? State { get; set; }
 
     public decimal? DevEffort { get; set; }
+
+    public decimal? IntialEffort { get; set; }
 }

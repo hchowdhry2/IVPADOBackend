@@ -44,6 +44,7 @@ namespace SRMDevOps.Repo
 
             public string? AssignedTo { get; set; }
             public decimal? DevEffort { get; set; }
+            public decimal? InitialEffort { get; set; }
 
         }
 
@@ -90,7 +91,8 @@ namespace SRMDevOps.Repo
                     Value = 1.0, // COUNTING logic
                     ClosedDate = x.td.ClosedDate,
                     ParentType = x.usd.ParentType, // Pulling ParentType from Story table
-                    State = x.td.State // Capture Task state for impact analysis
+                    State = x.td.State, // Capture Task state for impact analysis
+                    InitialEffort = x.td.IntialEffort
                 })
                 .OrderBy(x => x.Id).ThenBy(x => x.AssignedDate)
                 .ToListAsync();
@@ -489,6 +491,9 @@ namespace SRMDevOps.Repo
         {
             if (!data.Any()) return new List<ParentImpactDto>();
 
+            var validData = data.Where(x => x.ParentId.HasValue).ToList();
+            if (!validData.Any()) return new List<ParentImpactDto>();
+
             var transitionMap = data.GroupBy(h => h.Id).ToDictionary(
                 g => g.Key,
                 g => {
@@ -786,9 +791,11 @@ namespace SRMDevOps.Repo
         private SectionDto ProcessSectionFromMemory(List<UnifiedWorkItem> data, List<SprintDto> adoSprints, Dictionary<string, (DateTime Start, DateTime End)> dateMap, Dictionary<int, string> titleMap, string parentType, bool isTask)
         {
             // Filter the segment for this section (Feature or Client Issue)
+            var cleanData = data.Where(x => !string.IsNullOrEmpty(x.ParentType) && x.ParentId.HasValue).ToList();
+
             var sectionSegment = (parentType.ToLower() == "all")
-                ? data
-                : data.Where(x => x.ParentType?.Equals(parentType, StringComparison.OrdinalIgnoreCase) == true).ToList();
+                ? cleanData
+                : cleanData.Where(x => x.ParentType!.Equals(parentType, StringComparison.OrdinalIgnoreCase)).ToList();
 
             return new SectionDto
             {
@@ -798,32 +805,35 @@ namespace SRMDevOps.Repo
                 DailyTrends = GetDailyTrendStatsFromMemory(sectionSegment, dateMap, isTask),
                 DeveloperStats = isTask
                     ? GetDeveloperStatsInternal(sectionSegment, adoSprints)
-                    : new List<DeveloperSprintStatDto>()
+                    : new List<DeveloperSprintStatDto>(),
+                EffortVariance = isTask ? GetEffortVarianceFromMemory(sectionSegment, dateMap, adoSprints) : new List<EffortVarianceDto>()
             };
         }
 
-        private List<DeveloperSprintStatDto> GetDeveloperStatsInternal(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
+        private List<UnifiedWorkItem> GetQualifiedTaskAssignments(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
         {
             var sprintDateMap = adoSprints.ToDictionary(
                 s => s.Path,
-                s => new { Start = s.Attributes.StartDate, End = s.Attributes.FinishDate },
+                s => new { Start = s.Attributes.StartDate ?? DateTime.MinValue, End = s.Attributes.FinishDate ?? DateTime.Now },
                 StringComparer.OrdinalIgnoreCase);
 
-            // Identify the "True Owner" per task per sprint
-            var validOwners = sectionData
+            return sectionData
                 .GroupBy(t => new { t.Id, t.IterationPath })
                 .Select(group =>
                 {
                     var history = group.OrderBy(h => h.AssignedDate).ToList();
                     var dates = sprintDateMap.GetValueOrDefault(group.Key.IterationPath);
+                    if (dates == null) return null;
+
                     UnifiedWorkItem lastQualified = null;
 
+                    // Traverse backwards to find the last assignment that lasted >= 24 hours
                     for (int i = history.Count - 1; i >= 0; i--)
                     {
                         var current = history[i];
-                        DateTime nextDate = (i + 1 < history.Count)
-                            ? history[i + 1].AssignedDate
-                            : (current.ClosedDate ?? dates?.End ?? DateTime.Now);
+                        // Safe approach if you aren't sure about the dictionary value
+                        DateTime effectiveEnd = dates.End != default ? dates.End : DateTime.Now;
+                        DateTime nextDate = current.ClosedDate ?? effectiveEnd;
 
                         if ((nextDate - current.AssignedDate).TotalHours >= 24)
                         {
@@ -835,6 +845,17 @@ namespace SRMDevOps.Repo
                 })
                 .Where(v => v != null)
                 .ToList();
+        }
+
+        private List<DeveloperSprintStatDto> GetDeveloperStatsInternal(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
+        {
+            var sprintDateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => new { Start = s.Attributes.StartDate, End = s.Attributes.FinishDate },
+                StringComparer.OrdinalIgnoreCase);
+
+            // Identify the "True Owner" per task per sprint
+            var validOwners = GetQualifiedTaskAssignments(sectionData, adoSprints);
 
             // Final Aggregation and Sort (Most recent sprint first)
             return validOwners
@@ -849,7 +870,8 @@ namespace SRMDevOps.Repo
                             Developer = g.Key.AssignedTo ?? "Unassigned",
                             TotalTasksAssigned = g.Count(),
                             TotalTasksCompleted = g.Count(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase)),
-                            TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m)
+                            TotalHours = (double)g.Sum(x => x.DevEffort ?? 0m),
+                            SprintStartDate = sprintStart
                         },
                         SortDate = sprintStart
                     };
@@ -1004,6 +1026,30 @@ namespace SRMDevOps.Repo
                 .ToList();
 
             return result;
+        }
+
+        private List<EffortVarianceDto> GetEffortVarianceFromMemory(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap, List<SprintDto> adoSprints)
+        {
+            // 1. FILTER: Only include tasks that passed the "True Owner" logic
+            var validTasks = GetQualifiedTaskAssignments(data, adoSprints);
+
+            // 2. AGGREGATE: Now calculate variance only on these tasks
+            return validTasks
+                .Where(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+                .GroupBy(x => new { x.IterationPath, x.AssignedTo })
+                .Select(g => {
+                    var sprintDates = sprintDateMap.GetValueOrDefault(g.Key.IterationPath);
+                    return new EffortVarianceDto
+                    {
+                        Sprint = g.Key.IterationPath,
+                        Developer = g.Key.AssignedTo ?? "Unassigned",
+                        CommittedEffort = (double)g.Sum(x => x.InitialEffort ?? 0m),
+                        ActualEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
+                        SortDate = sprintDates.Start
+                    };
+                })
+                .OrderByDescending(x => x.SortDate)
+                .ToList();
         }
 
     }
