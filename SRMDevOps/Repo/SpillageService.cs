@@ -549,6 +549,7 @@ namespace SRMDevOps.Repo
         }
 
         // for monthly/quarterly timeframe
+       
         public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
             string? timeframe,
             int n,
@@ -557,123 +558,146 @@ namespace SRMDevOps.Repo
             string projectId,
             bool isTask = false)
         {
-            // 1. Get the timeframe boundaries (e.g., last 6 months)
+            // 1. Get the timeframe boundaries
             var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
             var periods = n > 0 ? n : defaultN;
             var windowStart = ComputeWindowStart(unit, periods);
 
-            // 2. Fetch the high-precision "Sprint-wise" data first
-            // This uses your working GetAggregatedStatsAsync logic for every individual sprint
+            // 2. Fetch the high-precision "Sprint-wise" data
             var rawSummary = await GetFullSummaryAsync(adoAreaPaths, adoSprints, projectId, isTask);
 
             // 3. Define the aggregator helper
+
             SectionDto AggregateByStartTime(SectionDto rawSection)
             {
-                var windowStart = ComputeWindowStart(unit, periods);
-
-                // 1. Helper to calculate the constant label (e.g., "Q1 2026")
-                string GetLabel(DateTime date) => unit switch
+                var groupedSection = new SectionDto
                 {
-                    "quarterly" => $"Q{((date.Month - 1) / 3) + 1} {date:yyyy}",
-                    "yearly" => date.ToString("yyyy"),
-                    _ => date.ToString("MMM yyyy")
+                    Stats = new List<SprintProgressDto>(),
+                    Spillage = new List<SpillageTrendDto>(),
+                    DeveloperStats = new List<DeveloperSprintStatDto>(),
+                    EffortVariance = new List<EffortVarianceDto>(),
+                    DeveloperActivityStats = new List<DeveloperSprintActivityDto>(),
+                    History = rawSection.History
                 };
 
-                // 2. Filter data first to respect the "Show last X" window
-                var statsFiltered = rawSection.Stats.Where(s => s.SortDate >= windowStart).ToList();
-                var spillageFiltered = rawSection.Spillage.Where(s => s.SortDate >= windowStart).ToList();
-                var devFiltered = rawSection.DeveloperStats.Where(ds => {
-                    var sprint = adoSprints.FirstOrDefault(s => s.Path.Equals(ds.Sprint, StringComparison.OrdinalIgnoreCase));
-                    return sprint?.Attributes?.StartDate >= windowStart;
-                }).ToList();
-                var effortFiltered = rawSection.EffortVariance.Where(ev => ev.SortDate >= windowStart).ToList();
+                var sprintDateLookup = adoSprints
+                    .Where(s => s.Attributes.StartDate.HasValue)
+                    .ToDictionary(s => s.Path, s => s.Attributes.StartDate.Value.Date, StringComparer.OrdinalIgnoreCase);
 
-                // 3. Group and Aggregate
-                return new SectionDto
+                for (int p = 0; p < periods; p++)
                 {
-                    History = rawSection.History,
-        
-                    Stats = statsFiltered.GroupBy(s => GetLabel(s.SortDate.Value))
-                        .Select(g => new SprintProgressDto {
-                            IterationPath = g.Key,
-                            SortDate = g.Min(x => x.SortDate),
-                            InitialPoints = g.Sum(x => x.InitialPoints),
-                            MidSprintAddedPoints = g.Sum(x => x.MidSprintAddedPoints),
-                            TotalPointsAssigned = g.Sum(x => x.TotalPointsAssigned),
-                            TotalPointsCompleted = g.Sum(x => x.TotalPointsCompleted),
-                            ClosedTimely = g.Sum(x => x.ClosedTimely),
-                            ClosedLate = g.Sum(x => x.ClosedLate)
-                        }).OrderBy(x => x.SortDate).ToList(),
+                    var periodStart = windowStart.AddMonths(p * bucketMonths).Date;
+                    var periodEnd = periodStart.AddMonths(bucketMonths).Date;
 
-                    Spillage = spillageFiltered.GroupBy(s => GetLabel(s.SortDate.Value))
-                        .Select(g => new SpillageTrendDto {
-                            IterationPath = g.Key,
-                            SortDate = g.Min(x => x.SortDate),
-                            SpillagePoints = g.Sum(x => x.SpillagePoints)
-                        }).OrderBy(x => x.SortDate).ToList(),
+                    string label = unit switch
+                    {
+                        "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
+                        "yearly" => periodStart.ToString("yyyy"),
+                        _ => periodStart.ToString("MMM yyyy")
+                    };
 
-                    DeveloperStats = devFiltered.GroupBy(ds => new { Label = GetLabel(adoSprints.First(s => s.Path.Equals(ds.Sprint, StringComparison.OrdinalIgnoreCase)).Attributes.StartDate.Value), ds.Developer })
-                        .Select(g => new DeveloperSprintStatDto {
-                            Sprint = g.Key.Label,
-                            Developer = g.Key.Developer,
+                    // --- 1. Stats & Spillage ---
+                    // Use .Date directly to avoid TimeZone shifts during comparison
+                    var sprintsInPeriod = rawSection.Stats
+                        .Where(s => s.SortDate.HasValue && s.SortDate.Value.Date >= periodStart && s.SortDate.Value.Date < periodEnd)
+                        .ToList();
+
+                    if (sprintsInPeriod.Any())
+                    {
+                        groupedSection.Stats.Add(new SprintProgressDto
+                        {
+                            IterationPath = label,
+                            SortDate = periodStart,
+                            InitialPoints = sprintsInPeriod.Sum(x => x.InitialPoints),
+                            MidSprintAddedPoints = sprintsInPeriod.Sum(x => x.MidSprintAddedPoints),
+                            TotalPointsAssigned = sprintsInPeriod.Sum(x => x.TotalPointsAssigned),
+                            TotalPointsCompleted = sprintsInPeriod.Sum(x => x.TotalPointsCompleted),
+                            ClosedTimely = sprintsInPeriod.Sum(x => x.ClosedTimely),
+                            ClosedLate = sprintsInPeriod.Sum(x => x.ClosedLate)
+                        });
+
+                        // Spillage needs to match the same sprints
+                        var spillageInPeriod = rawSection.Spillage
+                            .Where(s => s.SortDate.HasValue && s.SortDate.Value.Date >= periodStart && s.SortDate.Value.Date < periodEnd)
+                            .ToList();
+
+                        groupedSection.Spillage.Add(new SpillageTrendDto
+                        {
+                            IterationPath = label,
+                            SortDate = periodStart,
+                            SpillagePoints = spillageInPeriod.Sum(x => x.SpillagePoints)
+                        });
+                    }
+
+                    // --- 2. Developer Stats ---
+                    var devStatsInPeriod = rawSection.DeveloperStats
+                        .Where(ds => sprintDateLookup.TryGetValue(ds.Sprint, out var start) && start >= periodStart && start < periodEnd)
+                        .GroupBy(ds => ds.Developer)
+                        .Select(g => new DeveloperSprintStatDto
+                        {
+                            Sprint = label,
+                            Developer = g.Key,
                             TotalTasksAssigned = g.Sum(x => x.TotalTasksAssigned),
                             TotalTasksCompleted = g.Sum(x => x.TotalTasksCompleted),
                             TotalHours = g.Sum(x => x.TotalHours)
-                        }).ToList(),
+                        }).ToList();
+                    groupedSection.DeveloperStats.AddRange(devStatsInPeriod);
 
-                    EffortVariance = effortFiltered
-                        .GroupBy(ev => new {
-                            Label = GetLabel(ev.SortDate.Value),
-                            ev.Developer
-                        })
+                    // --- 3. Effort Variance ---
+                    var effortInPeriod = rawSection.EffortVariance
+                        .Where(ev => ev.SortDate.HasValue && ev.SortDate.Value.Date >= periodStart && ev.SortDate.Value.Date < periodEnd)
+                        .GroupBy(ev => ev.Developer)
                         .Select(g => new EffortVarianceDto
                         {
-                            Sprint = g.Key.Label,          // Period label (e.g., "Q1 2026")
-                            Developer = g.Key.Developer,   // Developer name
+                            Sprint = label,
+                            Developer = g.Key,
                             CommittedEffort = g.Sum(x => x.CommittedEffort),
                             ActualEffort = g.Sum(x => x.ActualEffort),
-                            SortDate = g.Min(x => x.SortDate)
+                            SortDate = periodStart
+                        }).ToList();
+                    groupedSection.EffortVariance.AddRange(effortInPeriod);
+
+                    // --- 4. Aggregate Developer Activity Stats ---
+                    var activitiesInPeriod = rawSection.DeveloperActivityStats
+                        .Where(s => s.SortDate.Date >= periodStart && s.SortDate.Date < periodEnd) // Simplified comparison
+                        .SelectMany(s => s.Activities.Select(a => new { Dev = s.Developer, Data = a }))
+                        .GroupBy(x => new { x.Dev, x.Data.ActivityType })
+                        .Select(g => new {
+                            g.Key.Dev,
+                            g.Key.ActivityType,
+                            Total = g.Sum(x => x.Data.Total),
+                            Completed = g.Sum(x => x.Data.Completed)
                         })
-                        .OrderBy(x => x.SortDate)
-                        .ToList(),
-
-                    // Inside AggregateByStartTime mapping
-                    DeveloperActivityStats = rawSection.DeveloperActivityStats
-                    .SelectMany(s => s.Activities.Select(a => new {
-                        // Use the properties directly instead of Splitting a string
-                        Dev = s.Developer,
-                        Period = GetLabel(adoSprints.First(sp => sp.Path.Equals(s.PeriodLabel)).Attributes.StartDate.Value),
-                        Data = a
-                    }))
-                    .GroupBy(x => new { x.Dev, x.Period, x.Data.ActivityType })
-                    .Select(g => new { g.Key.Dev, g.Key.Period, g.Key.ActivityType, Total = g.Sum(x => x.Data.Total), Completed = g.Sum(x => x.Data.Completed) })
-                    .GroupBy(x => new { x.Dev, x.Period })
-                    .Select(periodGroup => new DeveloperSprintActivityDto
-                    {
-                        // Map them to the two separate properties defined in your DTO
-                        Developer = periodGroup.Key.Dev,
-                        PeriodLabel = periodGroup.Key.Period, // This will now hold "Q1 2026" or "MMM yyyy"
-                        Activities = periodGroup.Select(x => new ActivityDetailDto
+                        .GroupBy(x => x.Dev)
+                        .Select(devGroup => new DeveloperSprintActivityDto
                         {
-                            ActivityType = x.ActivityType,
-                            Total = x.Total,
-                            Completed = x.Completed
-                        }).ToList()
-                    }).ToList(),
-
-                };
-
-               
-                
-            }
-                        // 4. Return the final summary grouped by Start Date
-                            return new SpillageSummaryDto
+                            Developer = devGroup.Key,
+                            PeriodLabel = label, // e.g. "Q1 2026"
+                            SortDate = periodStart,
+                            Activities = devGroup.Select(x => new ActivityDetailDto
                             {
-                                All = AggregateByStartTime(rawSummary.All),
-                                Feature = AggregateByStartTime(rawSummary.Feature),
-                                Client = AggregateByStartTime(rawSummary.Client)
-                            };
+                                ActivityType = x.ActivityType,
+                                Total = x.Total,
+                                Completed = x.Completed
+                            }).ToList()
+                        }).ToList();
+
+                    // CRITICAL: Ensure this line exists!
+                    groupedSection.DeveloperActivityStats.AddRange(activitiesInPeriod);
+                }
+
+                return groupedSection;
+            }
+
+            // 4. Return final summary
+            return new SpillageSummaryDto
+            {
+                All = AggregateByStartTime(rawSummary.All),
+                Feature = AggregateByStartTime(rawSummary.Feature),
+                Client = AggregateByStartTime(rawSummary.Client)
+            };
         }
+
         
 
         private (string unit, int bucketMonths, int defaultN) NormalizePeriodUnit(string? unit)
@@ -1067,6 +1091,12 @@ namespace SRMDevOps.Repo
 
         private List<DeveloperSprintActivityDto> GetDeveloperActivityStats(List<UnifiedWorkItem> sectionData, List<SprintDto> adoSprints)
         {
+            // Create a dictionary to find the StartDate for each iteration path
+            var sprintDateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => s.Attributes.StartDate ?? DateTime.MinValue,
+                StringComparer.OrdinalIgnoreCase);
+
             // Reuses your existing "True Owner" logic
             var validAssignments = GetQualifiedTaskAssignments(sectionData, adoSprints);
 
@@ -1077,6 +1107,7 @@ namespace SRMDevOps.Repo
                 {
                     Developer = group.Key.AssignedTo,
                     PeriodLabel = group.Key.IterationPath,
+                    SortDate = sprintDateMap.GetValueOrDefault(group.Key.IterationPath),
                     Activities = group
                         .GroupBy(a => a.Activity)
                         .Select(actGroup => new ActivityDetailDto
@@ -1137,6 +1168,7 @@ namespace SRMDevOps.Repo
         public string PeriodLabel { get; set; } // "sprint 05 jan - 23 jan 2026"
         public string Developer { get; set; }
         public List<ActivityDetailDto> Activities { get; set; } = new();
+        public DateTime SortDate { get; set; }
     }
 
     public class ActivityDetailDto
