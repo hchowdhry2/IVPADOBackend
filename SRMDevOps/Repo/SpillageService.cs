@@ -843,7 +843,7 @@ namespace SRMDevOps.Repo
                 DeveloperStats = isTask
                     ? GetDeveloperStatsInternal(sectionSegment, adoSprints)
                     : new List<DeveloperSprintStatDto>(),
-                EffortVariance = isTask ? GetEffortVarianceFromMemory(sectionSegment, dateMap, adoSprints) : new List<EffortVarianceDto>()
+                EffortVariance = isTask ? GetTeamEffortVariance(sectionSegment, dateMap) : new List<EffortVarianceDto>()
             };
         }
 
@@ -1065,21 +1065,52 @@ namespace SRMDevOps.Repo
             return result;
         }
 
-        private List<EffortVarianceDto> GetEffortVarianceFromMemory(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap, List<SprintDto> adoSprints)
-        {
-            // 1. FILTER: Only include tasks that passed the "True Owner" logic
-            var validTasks = GetQualifiedTaskAssignments(data, adoSprints);
+        //private List<EffortVarianceDto> GetEffortVarianceFromMemory(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap, List<SprintDto> adoSprints)
+        //{
+        //    // 1. FILTER: Only include tasks that passed the "True Owner" logic
+        //    var validTasks = GetQualifiedTaskAssignments(data, adoSprints);
 
-            // 2. AGGREGATE: Now calculate variance only on these tasks
-            return validTasks
-                .Where(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
-                .GroupBy(x => new { x.IterationPath, x.AssignedTo })
-                .Select(g => {
-                    var sprintDates = sprintDateMap.GetValueOrDefault(g.Key.IterationPath);
+        //    // 2. AGGREGATE: Now calculate variance only on these tasks
+        //    return validTasks
+        //        .Where(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+        //        .GroupBy(x => new { x.IterationPath, x.AssignedTo })
+        //        .Select(g => {
+        //            var sprintDates = sprintDateMap.GetValueOrDefault(g.Key.IterationPath);
+        //            return new EffortVarianceDto
+        //            {
+        //                Sprint = g.Key.IterationPath,
+        //                Developer = g.Key.AssignedTo ?? "Unassigned",
+        //                CommittedEffort = (double)g.Sum(x => x.InitialEffort ?? 0m),
+        //                ActualEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
+        //                SortDate = sprintDates.Start
+        //            };
+        //        })
+        //        .OrderByDescending(x => x.SortDate)
+        //        .ToList();
+        //}
+        private List<EffortVarianceDto> GetTeamEffortVariance(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap)
+        {
+            // 1. Identify the LATEST iteration path and state for every task
+            var closedTasks = data
+                .GroupBy(x => x.Id)
+                .Select(g => g.OrderByDescending(x => x.AssignedDate).FirstOrDefault())
+                .Where(t => t != null && t.State != null && t.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+                .ToList();
+
+            // 2. Aggregate by IterationPath (Team level)
+            return closedTasks
+                .GroupBy(t => t.IterationPath)
+                .Select(g =>
+                {
+                    var sprintDates = sprintDateMap.GetValueOrDefault(g.Key);
+
+                    // Calculate capacity threshold dynamically based on the sprint dates
+                    double capacity = sprintDates != default ? Math.Round((sprintDates.End - sprintDates.Start).TotalDays * 8.0, 1) : 0;
+
                     return new EffortVarianceDto
                     {
-                        Sprint = g.Key.IterationPath,
-                        Developer = g.Key.AssignedTo ?? "Unassigned",
+                        Sprint = g.Key,
+                        Developer = "Team Total", // Aggregated
                         CommittedEffort = (double)g.Sum(x => x.InitialEffort ?? 0m),
                         ActualEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
                         SortDate = sprintDates.Start
