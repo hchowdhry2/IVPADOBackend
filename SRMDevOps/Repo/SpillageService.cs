@@ -650,9 +650,7 @@ namespace SRMDevOps.Repo
                         .GroupBy(ev => ev.Developer)
                         .Select(g => new EffortVarianceDto
                         {
-                            Sprint = label,
                             Developer = g.Key,
-                            CommittedEffort = g.Sum(x => x.CommittedEffort),
                             ActualEffort = g.Sum(x => x.ActualEffort),
                             SortDate = periodStart
                         }).ToList();
@@ -685,6 +683,36 @@ namespace SRMDevOps.Repo
 
                     // CRITICAL: Ensure this line exists!
                     groupedSection.DeveloperActivityStats.AddRange(activitiesInPeriod);
+
+                    // Inside GetAggregatedTeamStatsAsync -> AggregateByStartTime
+                    // ... existing logic for Stats, Spillage, etc. ...
+
+                    // 5. Aggregate Category & Activity Breakdowns
+                    var periodCategoryData = rawSection.CategoryBreakdowns
+                        .Where(b => b.SortDate >= periodStart && b.SortDate < periodEnd)
+                        .GroupBy(b => new { b.Developer, b.Attribute })
+                        .Select(g => new EffortBreakdownDto
+                        {
+                            Developer = g.Key.Developer,
+                            Attribute = g.Key.Attribute,
+                            TotalEffort = g.Sum(x => x.TotalEffort),
+                            SortDate = periodStart
+                        });
+
+                    groupedSection.CategoryBreakdowns.AddRange(periodCategoryData);
+
+                    var periodActivityData = rawSection.ActivityBreakdowns
+                        .Where(b => b.SortDate >= periodStart && b.SortDate < periodEnd)
+                        .GroupBy(b => new { b.Developer, b.Attribute })
+                        .Select(g => new EffortBreakdownDto
+                        {
+                            Developer = g.Key.Developer,
+                            Attribute = g.Key.Attribute,
+                            TotalEffort = g.Sum(x => x.TotalEffort),
+                            SortDate = periodStart
+                        });
+
+                    groupedSection.ActivityBreakdowns.AddRange(periodActivityData);
                 }
 
                 return groupedSection;
@@ -846,8 +874,8 @@ namespace SRMDevOps.Repo
                     : new List<DeveloperSprintStatDto>(),
                 EffortVariance = isTask ? GetTeamEffortVariance(sectionSegment, dateMap) : new List<EffortVarianceDto>(),
 
-                CategoryBreakdowns = GetEffortBreakdowns(sectionSegment, "Category"),
-                ActivityBreakdowns = GetEffortBreakdowns(sectionSegment, "Activity")
+                CategoryBreakdowns = GetEffortBreakdowns(sectionSegment, adoSprints, "Category"),
+                ActivityBreakdowns = GetEffortBreakdowns(sectionSegment, adoSprints, "Activity")
             };
         }
 
@@ -1092,32 +1120,48 @@ namespace SRMDevOps.Repo
         //        .OrderByDescending(x => x.SortDate)
         //        .ToList();
         //}
+        //private List<EffortVarianceDto> GetTeamEffortVariance(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap)
+        //{
+        //    // 1. Filter: Only consider tasks that are "Closed"
+        //    var closedTasks = data
+        //        .Where(t => t.State != null && t.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+        //        .ToList();
+
+        //    // 2. Aggregate by IterationPath AND Developer
+        //    return closedTasks
+        //        .GroupBy(t => new { t.IterationPath, t.AssignedTo }) // Group by Sprint AND Developer
+        //        .Select(g =>
+        //        {
+        //            var sprintDates = sprintDateMap.GetValueOrDefault(g.Key.IterationPath);
+
+        //            return new EffortVarianceDto
+        //            {
+        //                Developer = g.Key.AssignedTo ?? "Unassigned", // Use actual developer name
+        //                ActualEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
+        //                SortDate = sprintDates.Start
+        //            };
+        //        })
+        //        .OrderByDescending(x => x.SortDate)
+        //        .ToList();
+        //}
+
         private List<EffortVarianceDto> GetTeamEffortVariance(List<UnifiedWorkItem> data, Dictionary<string, (DateTime Start, DateTime End)> sprintDateMap)
         {
-            // 1. Identify the LATEST iteration path and state for every task
+            // 1. Filter: Only consider tasks that are "Closed"
             var closedTasks = data
-                .GroupBy(x => x.Id)
-                .Select(g => g.OrderByDescending(x => x.AssignedDate).FirstOrDefault())
-                .Where(t => t != null && t.State != null && t.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
+                .Where(t => t.State != null && t.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
                 .ToList();
 
-            // 2. Aggregate by IterationPath (Team level)
+            // 2. Aggregate by IterationPath AND Developer
             return closedTasks
-                .GroupBy(t => t.IterationPath)
+                .GroupBy(t => new { t.AssignedTo }) // Group by Sprint AND Developer
                 .Select(g =>
                 {
-                    var sprintDates = sprintDateMap.GetValueOrDefault(g.Key);
-
-                    // Calculate capacity threshold dynamically based on the sprint dates
-                    double capacity = sprintDates != default ? Math.Round((sprintDates.End - sprintDates.Start).TotalDays * 8.0, 1) : 0;
 
                     return new EffortVarianceDto
                     {
-                        Sprint = g.Key,
-                        Developer = "Team Total", // Aggregated
-                        CommittedEffort = (double)g.Sum(x => x.InitialEffort ?? 0m),
+                        Developer = g.Key.AssignedTo ?? "Unassigned", // Use actual developer name
                         ActualEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
-                        SortDate = sprintDates.Start
                     };
                 })
                 .OrderByDescending(x => x.SortDate)
@@ -1155,21 +1199,29 @@ namespace SRMDevOps.Repo
                 .ToList();
         }
 
-        private List<EffortBreakdownDto> GetEffortBreakdowns(List<UnifiedWorkItem> data, string type)
+        private List<EffortBreakdownDto> GetEffortBreakdowns(List<UnifiedWorkItem> data, List<SprintDto> adoSprints, string type)
         {
+            var sprintDateMap = adoSprints.ToDictionary(
+                s => s.Path,
+                s => s.Attributes.StartDate ?? DateTime.MinValue,
+                StringComparer.OrdinalIgnoreCase);
+
             return data
                 .Where(x => x.State != null && x.State.Equals("Closed", StringComparison.OrdinalIgnoreCase))
                 .GroupBy(x => new {
                     Developer = x.AssignedTo ?? "Unassigned",
-                    Attribute = (type == "Category" ? (x.ParentType ?? "Uncategorized") : (x.Activity ?? "Uncategorized"))
+                    Attribute = (type == "Category" ? (x.ParentType ?? "Uncategorized") : (x.Activity ?? "Uncategorized")),
+                    IterationPath = x.IterationPath
                 })
                 .Select(g => new EffortBreakdownDto
                 {
                     Developer = g.Key.Developer,
                     Attribute = g.Key.Attribute,
-                    TotalEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m)
+                    TotalEffort = (double)g.Sum(x => (x.DevEffort ?? 0m) * 7m),
+                    // Ensure this is set correctly!
+                    SortDate = sprintDateMap.GetValueOrDefault(g.Key.IterationPath, DateTime.MinValue)
                 })
-                .ToList();
+    .ToList();
         }
 
     }
@@ -1235,5 +1287,6 @@ namespace SRMDevOps.Repo
         public string Developer { get; set; }
         public string Attribute { get; set; } // e.g., "Feature", "Client Issue" or "Dev", "Testing"
         public double TotalEffort { get; set; }
+        public DateTime SortDate { get; set; }
     }
 }
