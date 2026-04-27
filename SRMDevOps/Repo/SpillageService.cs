@@ -425,7 +425,7 @@ namespace SRMDevOps.Repo
         //                path,
         //                data.Initial + data.Added,
         //                data.Initial,
-        //                data.Added,
+        //                data.Added,GetSprintsForTimeframeAsync
         //                data.Closed,
         //                sprintDateMap[path].Start
         //            );
@@ -549,25 +549,37 @@ namespace SRMDevOps.Repo
         }
 
         // for monthly/quarterly timeframe
-       
+
         public async Task<SpillageSummaryDto> GetAggregatedTeamStatsAsync(
-            string? timeframe,
-            int n,
-            List<string> adoAreaPaths,
-            List<SprintDto> adoSprints,
-            string projectId,
-            bool isTask = false)
+    string? timeframe,
+    int n,
+    List<string> adoAreaPaths,
+    List<SprintDto> adoSprints,
+    string projectId,
+    bool isTask = false)
         {
             // 1. Get the timeframe boundaries
             var (unit, bucketMonths, defaultN) = NormalizePeriodUnit(timeframe);
             var periods = n > 0 ? n : defaultN;
-            var windowStart = ComputeWindowStart(unit, periods);
+
+            // Check if we are in financial mode
+            bool isFinancial = timeframe?.ToLower().Contains("financial") ?? false;
+
+            // Calculate Financial Start (April 1st)
+            DateTime GetFinancialStartDate(string type)
+            {
+                int year = DateTime.Now.Month >= 4 ? DateTime.Now.Year : DateTime.Now.Year - 1;
+                if (type.ToLower() == "financial_previous") year--;
+                return new DateTime(year, 4, 1);
+            }
+
+            var windowStart = isFinancial ? GetFinancialStartDate(timeframe!) : ComputeWindowStart(unit, periods);
+            if (isFinancial) periods = 1; // Force a single iteration for the specific year
 
             // 2. Fetch the high-precision "Sprint-wise" data
             var rawSummary = await GetFullSummaryAsync(adoAreaPaths, adoSprints, projectId, isTask);
 
             // 3. Define the aggregator helper
-
             SectionDto AggregateByStartTime(SectionDto rawSection)
             {
                 var groupedSection = new SectionDto
@@ -586,18 +598,28 @@ namespace SRMDevOps.Repo
 
                 for (int p = 0; p < periods; p++)
                 {
-                    var periodStart = windowStart.AddMonths(p * bucketMonths).Date;
-                    var periodEnd = periodStart.AddMonths(bucketMonths).Date;
+                    // --- UPDATED PERIOD CALCULATION ---
+                    DateTime periodStart, periodEnd;
+                    if (isFinancial)
+                    {
+                        periodStart = windowStart;
+                        periodEnd = windowStart.AddYears(1);
+                    }
+                    else
+                    {
+                        periodStart = windowStart.AddMonths(p * bucketMonths).Date;
+                        periodEnd = periodStart.AddMonths(bucketMonths).Date;
+                    }
 
                     string label = unit switch
                     {
+                        "financial" => $"FY {periodStart:yy}-{periodStart.AddYears(1):yy}",
                         "quarterly" => $"Q{((periodStart.Month - 1) / 3) + 1} {periodStart:yyyy}",
                         "yearly" => periodStart.ToString("yyyy"),
                         _ => periodStart.ToString("MMM yyyy")
                     };
 
                     // --- 1. Stats & Spillage ---
-                    // Use .Date directly to avoid TimeZone shifts during comparison
                     var sprintsInPeriod = rawSection.Stats
                         .Where(s => s.SortDate.HasValue && s.SortDate.Value.Date >= periodStart && s.SortDate.Value.Date < periodEnd)
                         .ToList();
@@ -616,7 +638,6 @@ namespace SRMDevOps.Repo
                             ClosedLate = sprintsInPeriod.Sum(x => x.ClosedLate)
                         });
 
-                        // Spillage needs to match the same sprints
                         var spillageInPeriod = rawSection.Spillage
                             .Where(s => s.SortDate.HasValue && s.SortDate.Value.Date >= periodStart && s.SortDate.Value.Date < periodEnd)
                             .ToList();
@@ -637,7 +658,7 @@ namespace SRMDevOps.Repo
                         {
                             Sprint = label,
                             Developer = g.Key,
-                            SortDate = periodStart, // Use the latest sort date for the developer
+                            SortDate = periodStart,
                             TotalTasksAssigned = g.Sum(x => x.TotalTasksAssigned),
                             TotalTasksCompleted = g.Sum(x => x.TotalTasksCompleted),
                             TotalHours = g.Sum(x => x.TotalHours)
@@ -658,7 +679,7 @@ namespace SRMDevOps.Repo
 
                     // --- 4. Aggregate Developer Activity Stats ---
                     var activitiesInPeriod = rawSection.DeveloperActivityStats
-                        .Where(s => s.SortDate.Date >= periodStart && s.SortDate.Date < periodEnd) // Simplified comparison
+                        .Where(s => s.SortDate.Date >= periodStart && s.SortDate.Date < periodEnd)
                         .SelectMany(s => s.Activities.Select(a => new { Dev = s.Developer, Data = a }))
                         .GroupBy(x => new { x.Dev, x.Data.ActivityType })
                         .Select(g => new {
@@ -671,7 +692,7 @@ namespace SRMDevOps.Repo
                         .Select(devGroup => new DeveloperSprintActivityDto
                         {
                             Developer = devGroup.Key,
-                            PeriodLabel = label, // e.g. "Q1 2026"
+                            PeriodLabel = label,
                             SortDate = periodStart,
                             Activities = devGroup.Select(x => new ActivityDetailDto
                             {
@@ -681,11 +702,7 @@ namespace SRMDevOps.Repo
                             }).ToList()
                         }).ToList();
 
-                    // CRITICAL: Ensure this line exists!
                     groupedSection.DeveloperActivityStats.AddRange(activitiesInPeriod);
-
-                    // Inside GetAggregatedTeamStatsAsync -> AggregateByStartTime
-                    // ... existing logic for Stats, Spillage, etc. ...
 
                     // 5. Aggregate Category & Activity Breakdowns
                     var periodCategoryData = rawSection.CategoryBreakdowns
@@ -718,7 +735,6 @@ namespace SRMDevOps.Repo
                 return groupedSection;
             }
 
-            // 4. Return final summary
             return new SpillageSummaryDto
             {
                 All = AggregateByStartTime(rawSummary.All),
@@ -727,7 +743,6 @@ namespace SRMDevOps.Repo
             };
         }
 
-        
 
         private (string unit, int bucketMonths, int defaultN) NormalizePeriodUnit(string? unit)
         {
@@ -736,6 +751,7 @@ namespace SRMDevOps.Repo
             {
                 "quarter" or "quarterly" => ("quarterly", 3, 4),
                 "year" or "yearly" => ("yearly", 12, 1),
+                "financial_current" or "financial_previous" => ("financial", 12, 1), // Treated as 1 period of 12 months
                 _ => ("monthly", 1, 6)
             };
         }
@@ -954,17 +970,27 @@ namespace SRMDevOps.Repo
         public async Task<List<SprintDto>> GetSprintsForTimeframeAsync(string projectId, string teamId, string? timeframe, int n)
         {
             var t = timeframe?.ToLower() ?? "";
+            bool isFinancial = t.Contains("financial");
 
             // 1. Calculate Multiplier
-            int multiplier = t switch
-            {
-                var x when x.Contains("year") => 30,
-                var x when x.Contains("quarter") => 10,
-                _ => 4// Monthly needs ~3, Sprint-wise needs enough to cover the 'n'
-            };
+            int fetchCount;
 
-            // 2. Fetch a large enough raw pool (n * multiplier + buffer)
-            int fetchCount = (n * multiplier) + 10;
+            // 1. Handle Financial Years (Hardcoded, ignores n)
+            if (timeframe?.ToLower().Contains("financial") == true)
+            {
+                fetchCount = 50;
+            }
+            // 2. Handle everything else (Scales with n as before)
+            else
+            {
+                int multiplier = timeframe?.ToLower() switch
+                {
+                    var x when x != null && x.Contains("year") => 30,
+                    var x when x != null && x.Contains("quarter") => 10,
+                    _ => 4 // Monthly/Default
+                };
+                fetchCount = (n * multiplier) + 10;
+            }
             var allSprints = await _devops.GetRecentSprintsAsync(projectId, teamId, lastNSprints: fetchCount);
 
             // 3. Filter for Started Sprints only
